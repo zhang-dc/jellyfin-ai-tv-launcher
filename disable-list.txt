@@ -1,0 +1,29 @@
+# 停用清单（pm disable-user，不卸载；恢复：node tv.mjs restore）
+# 第一列包名，# 后是说明。2026-10-18 和用户逐类确认过。
+
+# --- 广告 / 统计 / 推送 / 云控（默认就停）---
+com.miui.analytics                       # MIUI 统计
+com.miui.tv.analytics                    # 电视统计
+com.xiaomi.statistic                     # MiTVStat 统计
+com.mitv.cloudcontrol                    # 云控（下发广告与推荐配置）
+com.xiaomi.mitv.tvpush.tvpushservice     # 推送服务（弹窗推广）
+com.duokan.videodaily                    # 每日视频推荐
+
+# --- 用户勾选：游戏 ---
+com.xiaomi.mibox.gamecenter              # 小米游戏中心
+com.xiaomi.gamecenter.sdk.service.mibox  # 游戏中心 SDK
+com.tencent.start.tv                     # 腾讯 START 云游戏
+
+# --- 用户勾选：购物与通话 ---
+com.xiaomi.mitv.shop                     # 电视商城
+com.mitv.shoplugin                       # 商城插件
+com.xiaomi.mitv.tvvideocall              # 视频通话
+
+# --- 用户勾选：音乐/K歌/天气/日历/相册 ---
+com.xiaomi.mimusic2                      # 音乐
+com.xiaomi.mitv.karaoke.service          # K 歌
+com.xiaomi.tweather                      # 天气
+com.xiaomi.mitv.calendar                 # 日历
+com.mitv.gallery                         # 相册
+com.xiaomi.tv.gallery                    # 相册（另一个）
+

@@ -1,0 +1,4 @@
+# Jellyfin 连接配置（见 docs/jellyfin.md）。复制成 jellyfin.properties 再填，那个文件不要提交。
+server=http://<Jellyfin主机IP>:8096
+apiKey=<Jellyfin 控制台 → API 密钥 里新建的密钥>
+userId=<电视上 Jellyfin 登录的那个用户的 ID>

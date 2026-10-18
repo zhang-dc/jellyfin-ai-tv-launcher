@@ -1,0 +1,4 @@
+# 后端网关配置（见 docs/protocol.md）。复制成 gateway.properties 再填，那个文件不要提交。
+# 网关和 Jellyfin 跑在同一台机器上，主机名沿用 Jellyfin 的地址，这里只填端口。
+port=18796
+token=<一串足够长的随机字符，和后端校验的 X-TV-Token 一致>

@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.optimisticat.tvhome"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="29" />
+
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <!-- 只连家里的 Jellyfin（首页「最近播放 / 最近下载」） -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Android 11+ 才需要，留着方便以后换电视 -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <!-- 判断原厂桌面是否跑到前台（它的窗口对无障碍隐藏）；adb appops 授予 -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" />
+    <!-- 问问 / 找剧 的语音输入（电视内置麦克风）；adb pm grant 授予 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 遥控器语音键借小爱听写：读 logcat 里小爱的识别结果（见 XiaoaiBridge）；adb pm grant 授予 -->
+    <uses-permission android:name="android.permission.READ_LOGS" />
+
+    <application
+        android:label="@string/app_name"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="true">
+        <activity
+            android:name=".MainActivity"
+            android:launchMode="singleTask"
+            android:stateNotNeeded="true"
+            android:clearTaskOnLaunch="true"
+            android:excludeFromRecents="true"
+            android:screenOrientation="landscape"
+            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity android:name=".AgentActivity" android:exported="true" android:launchMode="singleTask" android:screenOrientation="landscape" android:windowSoftInputMode="adjustResize" />
+        <activity android:name=".SearchActivity" android:screenOrientation="landscape" android:windowSoftInputMode="adjustResize" />
+        <activity android:name=".DownloadsActivity" android:screenOrientation="landscape" />
+
+        <!-- 国内版小米电视不让第三方当默认桌面：靠无障碍服务把主页键接过来，见 HomeKeyService -->
+        <service
+            android:name=".HomeKeyService"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/home_key_service" />
+        </service>
+    </application>
+</manifest>

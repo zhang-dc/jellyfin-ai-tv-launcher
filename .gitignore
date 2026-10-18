@@ -1,0 +1,9 @@
+# 工具链 / 产物 / 本地状态（都不入库）
+tools/
+backup/
+shots/
+.tv-addr
+launcher/out/
+launcher/debug.keystore
+launcher/assets/*.properties
+node_modules/

@@ -5,7 +5,8 @@
 A **minimal, ad-free launcher** for Android TV and mainland-China Xiaomi TVs that brings your home media server and your own AI agent onto the TV:
 
 - **No ads, no "recommended" rows** — black background, a clock, and your stuff
-- **Continue watching / Recently added** — read straight from your Jellyfin server, with progress bars; press OK to jump right into that episode in the Jellyfin app
+- **Continue watching / Recently added** — read straight from your Jellyfin server, with progress bars; press OK and it starts playing right away
+- **Built-in player with subtitles done right** — ExoPlayer straight from Jellyfin (falls back to server transcoding), resume + progress sync, auto next episode. Subtitles are rendered by the launcher itself: **adjust timing live with the remote** (0.1 s steps, remember per season, or ask your agent to fix the file for good), outline / translucent / black-box styles, white / yellow, three sizes, overlapping lines merged, and the video's own subtitle tracks (incl. PGS) selectable
 - **Ask** — talk to your own AI agent: hold OK and speak into the TV, press the remote's voice button (transcribed by the built-in Xiaomi assistant), or type
 - **Find / Downloads** — search for content, start a download, watch progress (implemented by your own backend)
 - **Debloat script** — disable preinstalled ad, analytics and push packages over ADB, fully reversible
@@ -20,6 +21,7 @@ Only the **TV side**: the launcher APK source and an ADB maintenance script. Bac
 
 ```
 launcher/          Launcher APK source (plain Java + platform widgets; no AndroidX, no Gradle)
+  deps.mjs         Fetches Media3 (ExoPlayer) + transitive deps from Maven, no Gradle
   build.mjs        One command → signed APK
   assets/*.example Config templates (Jellyfin, backend gateway)
 tv.mjs             ADB tooling: backup, debloat, restore, screenshot, enable home-key takeover
@@ -49,12 +51,12 @@ Anything not configured is hidden automatically.
 > The build and ADB scripts are currently written for **Windows** (paths to `7z.exe`, `adb.exe`, and a default JDK location; override with `JAVA_HOME`). On macOS/Linux, adjust those few paths in `launcher/build.mjs` and `tv.mjs` — or ask your AI assistant to.
 
 - TV: Settings → About → press "Model" 7 times to enable developer mode → turn on **ADB debugging**
-- PC: JDK 17, Node.js 18+, 7-Zip. Android SDK needs only `build-tools;34.0.0` and `platforms;android-29`, placed in `tools/android-sdk`
+- PC: JDK 17, Node.js 18+, 7-Zip. Android SDK needs only `build-tools;34.0.0` and `platforms;android-34`, placed in `tools/android-sdk`
 - adb: put `platform-tools` in `tools/platform-tools`
 
 ```bash
 # Android command-line tools — just the two packages, no Android Studio
-sdkmanager --sdk_root=tools/android-sdk "build-tools;34.0.0" "platforms;android-29"
+sdkmanager --sdk_root=tools/android-sdk "build-tools;34.0.0" "platforms;android-34"
 ```
 
 ### 2. Connect and back up first
@@ -80,6 +82,7 @@ node tv.mjs restore          # changed your mind? restores everything from the b
 cd launcher
 cp assets/jellyfin.properties.example assets/jellyfin.properties   # optional, see docs/jellyfin.md
 cp assets/gateway.properties.example  assets/gateway.properties    # optional, see docs/protocol.md
+node deps.mjs                # once: downloads the player engine (Media3) and its deps into libs/, no Gradle
 node build.mjs               # → out/tvhome.apk
 ```
 

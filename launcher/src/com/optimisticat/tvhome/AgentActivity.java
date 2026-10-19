@@ -226,7 +226,8 @@ public class AgentActivity extends Activity implements XiaoaiBridge.Target {
     private View buildDock() {
         LinearLayout dock = new LinearLayout(this);
         dock.setGravity(Gravity.CENTER_VERTICAL);
-        dock.setPadding(px(12), 0, px(16), 0);
+        dock.setPadding(px(14), 0, px(16), 0);
+        dock.setClipToPadding(false);   // 麦克风选中放大 1.1 倍会伸进内边距，默认会被裁掉一块（2026-10-20 用户截图）
         dock.setBackground(Ui.rounded(0xFF1C1C1E, px(56)));
         dock.setClipChildren(false);
 

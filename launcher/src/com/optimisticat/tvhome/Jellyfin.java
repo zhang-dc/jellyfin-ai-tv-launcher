@@ -33,7 +33,7 @@ import java.util.Set;
 final class Jellyfin {
 
     static final class Item {
-        String id, title, subtitle, imageUrl;
+        String id, type, title, subtitle, imageUrl;
         float progress;   // 0~1，没看过为 0
     }
 
@@ -86,6 +86,76 @@ final class Jellyfin {
         return server;
     }
 
+// ---------------------------------------------------------------- 播放器用（PlayerActivity）
+
+    /** 条目详情 + 媒体源（含每条音视频 / 字幕流）。 */
+    JSONObject item(String id) throws Exception {
+        return getJson("/Users/" + userId + "/Items/" + id + "?Fields=MediaSources,MediaStreams,Path");
+    }
+
+    /** 原文件直出（电视硬解）。播放器直接拿这个 URL 去拉，鉴权走 api_key 参数。 */
+    String streamUrl(String id, String mediaSourceId) {
+        return server + "/Videos/" + id + "/stream?static=true&mediaSourceId=" + mediaSourceId + "&api_key=" + apiKey;
+    }
+
+    /** 放不了原文件时让服务器转成 H.264 + AAC 的 HLS（本机有显卡转码）。 */
+    String transcodeUrl(String id, String mediaSourceId) {
+        return server + "/Videos/" + id + "/master.m3u8?mediaSourceId=" + mediaSourceId + "&api_key=" + apiKey
+                + "&VideoCodec=h264&AudioCodec=aac&TranscodingMaxAudioChannels=2&SegmentContainer=ts&DeviceId=tvhome&PlaySessionId="
+                + Long.toHexString(System.nanoTime());
+    }
+
+    /**
+     * 某条字幕流的文本，统一转成 SRT —— 外挂 srt/ass 和内嵌文本轨 Jellyfin 都能转，播放器只解析一种格式。
+     * 图形字幕（PGS 等）转不了，调用方别拿它来调。
+     */
+    String subtitleSrt(String id, String mediaSourceId, int streamIndex) throws Exception {
+        return get("/Videos/" + id + "/" + mediaSourceId + "/Subtitles/" + streamIndex + "/0/Stream.srt");
+    }
+
+    /**
+     * 存观看进度 / 看完。2026-10-19 在 Jellyfin 10.11 上实测：用 API 密钥调 /PlayingItems 的开始/进度/停止上报
+     * 都回 204 但不落库（API 密钥不绑会话），只有直接写 UserData 才生效，首页「最近播放」靠的就是它。
+     */
+    void saveProgress(String id, long positionTicks, boolean played) throws Exception {
+        JSONObject body = new JSONObject()
+                .put("PlaybackPositionTicks", played ? 0 : positionTicks)
+                .put("Played", played)
+                .put("LastPlayedDate", iso(System.currentTimeMillis()));
+        post("/UserItems/" + id + "/UserData?userId=" + userId, body.toString());
+    }
+
+    /** 同一部剧里紧接着的下一集；没有返回 null。 */
+    JSONObject nextEpisode(String seriesId, String currentId) throws Exception {
+        JSONArray eps = getJson("/Shows/" + seriesId + "/Episodes?userId=" + userId + "&startItemId=" + currentId + "&Limit=2")
+                .optJSONArray("Items");
+        return eps != null && eps.length() > 1 ? eps.getJSONObject(1) : null;
+    }
+
+    private static String iso(long ms) {
+        java.text.SimpleDateFormat f = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US);
+        f.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+        return f.format(new java.util.Date(ms));
+    }
+
+    private void post(String path, String json) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(server + path).openConnection();
+        c.setConnectTimeout(2500);
+        c.setReadTimeout(8000);
+        c.setRequestMethod("POST");
+        c.setRequestProperty("X-Emby-Token", apiKey);
+        c.setRequestProperty("Content-Type", "application/json");
+        c.setDoOutput(true);
+        byte[] b = json.getBytes(StandardCharsets.UTF_8);
+        c.setFixedLengthStreamingMode(b.length);
+        try (java.io.OutputStream out = c.getOutputStream()) {
+            out.write(b);
+        }
+        int code = c.getResponseCode();
+        c.disconnect();
+        if (code >= 300) throw new java.io.IOException("HTTP " + code + " " + path);
+    }
+
     Bitmap image(String url) throws Exception {
         HttpURLConnection c = open(url);
         try (InputStream in = c.getInputStream()) {
@@ -101,6 +171,7 @@ final class Jellyfin {
         Item it = new Item();
         it.id = o.optString("Id");
         String type = o.optString("Type");
+        it.type = type;
         JSONObject tags = o.optJSONObject("ImageTags");
         if ("Episode".equals(type)) {
             it.title = o.optString("SeriesName");

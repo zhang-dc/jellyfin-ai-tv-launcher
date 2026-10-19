@@ -117,7 +117,9 @@ final class Recorder {
             rec.stop();
             rec.release();
         }
-        if (holdToTalk ? totalMs < 400 : (!spoke && !stopped)) return null;   // 按一下就松开 = 误触
+        // 按一下就松开 = 误触；按住了但全程没到说话音量 = 没说话。两种都不送识别：
+        // whisper 拿到静音会编出「优优独播剧场——YoYo Television Series Exclusive」这类训练数据里的片头字幕（2026-10-20 实际发生）
+        if (holdToTalk ? (totalMs < 400 || !spoke) : (!spoke && !stopped)) return null;
         return wav(pcm.toByteArray());
     }
 

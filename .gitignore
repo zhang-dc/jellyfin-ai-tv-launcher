@@ -4,6 +4,7 @@ backup/
 shots/
 .tv-addr
 launcher/out/
+launcher/libs/
 launcher/debug.keystore
 launcher/assets/*.properties
 node_modules/

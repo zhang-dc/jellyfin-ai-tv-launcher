@@ -54,3 +54,22 @@ userId=<第 2 步的用户 ID>
 | 图片 | `GET /Items/{id}/Images/{Primary|Thumb|Backdrop}?maxWidth=480` |
 
 点卡片打开那一集：启动 `org.jellyfin.androidtv/.ui.startup.StartupActivity`，带 extra `ItemId=<条目ID>`。这是 Jellyfin 客户端自己首页频道用的入口，会直接进到详情页。
+
+## 内置播放器用到的接口
+
+单集和电影卡片会用桌面自带的播放器（`PlayerActivity.java`）直接播放，不经过 Jellyfin 客户端：
+
+| 用途 | 接口 |
+|---|---|
+| 条目 + 媒体流 | `GET /Users/{userId}/Items/{id}?Fields=MediaSources,MediaStreams,Path` |
+| 原文件直出 | `GET /Videos/{id}/stream?static=true&mediaSourceId=…&api_key=…` |
+| 放不了时转码 | `GET /Videos/{id}/master.m3u8?mediaSourceId=…&VideoCodec=h264&AudioCodec=aac&api_key=…` |
+| 字幕转成 SRT | `GET /Videos/{id}/{mediaSourceId}/Subtitles/{streamIndex}/0/Stream.srt`（外挂 srt/ass 和内嵌文本轨都能转） |
+| 下一集 | `GET /Shows/{seriesId}/Episodes?userId=…&startItemId={当前集}&Limit=2` |
+| 存进度 / 看完 | `POST /UserItems/{id}/UserData?userId=…`，body `{"PlaybackPositionTicks":…,"Played":…,"LastPlayedDate":"…"}` |
+
+> **坑**：在 Jellyfin 10.11 上用 API 密钥调 `/PlayingItems/{id}`（开始 / 进度 / 停止上报），都返回 204，但**进度不会落库**，因为 API 密钥不绑定用户会话。直接写 `UserData` 才生效，首页「最近播放」靠的就是它。
+
+字幕由桌面自己渲染（`SubtitleEngine.java`），所以能用遥控器实时调时间。视频自带的图形字幕（蓝光 PGS）转不了文本，交给 ExoPlayer 解码后画在同一位置，这类字幕不能调时间。
+
+另外一个安卓本身的坑：视频要用 `TextureView` 显示，不要用 `SurfaceView`。`SurfaceView` 是独立图层，被半透明浮层（比如进度条的渐变底）盖住的区域会换一种方式合成，色彩换算不一样，浮层顶边会出现一条明显的亮度断层。

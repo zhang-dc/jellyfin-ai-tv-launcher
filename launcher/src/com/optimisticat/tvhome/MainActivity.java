@@ -339,6 +339,7 @@ public class MainActivity extends Activity {
         TextView v = text(label, 24, Color.WHITE, Typeface.DEFAULT);
         v.setPadding(dp(28), dp(12), dp(28), dp(12));
         v.setFocusable(true);
+        Ui.noHighlight(v);
         v.setClickable(true);
         v.setOnClickListener(onClick);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
@@ -467,7 +468,7 @@ public class MainActivity extends Activity {
                 moveGlow(v, tint[0]);
             }
         });
-        c.setOnClickListener(v -> openInJellyfin(it.id));
+        c.setOnClickListener(v -> openItem(it));
         return c;
     }
 
@@ -490,6 +491,12 @@ public class MainActivity extends Activity {
             } catch (Exception ignored) {
             }
         });
+    }
+
+    /** 单集 / 电影用自己的播放器直接开播（字幕能现场调）；整部剧的卡片还是交给 Jellyfin 详情页选集。 */
+    private void openItem(Jellyfin.Item it) {
+        if ("Episode".equals(it.type) || "Movie".equals(it.type)) PlayerActivity.play(this, it.id);
+        else openInJellyfin(it.id);
     }
 
     private void openInJellyfin(String itemId) {

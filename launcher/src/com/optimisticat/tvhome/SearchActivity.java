@@ -112,7 +112,9 @@ public class SearchActivity extends Activity implements XiaoaiBridge.Target {
         // 搜索条：放大镜 | 输入框 | 麦克风 | 搜索
         LinearLayout bar = new LinearLayout(this);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(px(28), 0, px(12), 0);
+        bar.setPadding(px(28), 0, px(14), 0);
+        bar.setClipToPadding(false);   // 右边的圆按钮选中放大会伸进内边距
+        bar.setClipChildren(false);
         bar.setBackground(Ui.rounded(0xFF1C1C1E, px(48)));
         ImageView glass = new ImageView(this);
         glass.setImageDrawable(new Icons(Icons.Kind.SEARCH, 0xFF8E8E93));

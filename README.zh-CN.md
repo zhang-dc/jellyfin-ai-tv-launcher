@@ -1,4 +1,4 @@
-# TV AI Launcher
+# Jellyfin AI TV Launcher
 
 [English](README.md) | **简体中文**
 

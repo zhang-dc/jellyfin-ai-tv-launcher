@@ -4,9 +4,11 @@
 
 A **minimal, ad-free launcher** for Android TV and mainland-China Xiaomi TVs that brings your home media server and your own AI agent onto the TV:
 
-- **No ads, no "recommended" rows** — black background, a clock, and your stuff
+- **No ads, no "recommended" rows** — just your stuff
+- **Cinematic home** — whatever show has focus fills the screen with its backdrop, logo, rating and overview (Apple TV style)
 - **Continue watching / Recently added** — read straight from your Jellyfin server, with progress bars; press OK and it starts playing right away
-- **Built-in player with subtitles done right** — ExoPlayer straight from Jellyfin (falls back to server transcoding), resume + progress sync, auto next episode. Subtitles are rendered by the launcher itself: **adjust timing live with the remote** (0.1 s steps, remember per season, or ask your agent to fix the file for good), outline / translucent / black-box styles, white / yellow, three sizes, overlapping lines merged, and the video's own subtitle tracks (incl. PGS) selectable
+- **Series page** — resume / start over, season tabs, episode cards (watched check marks, progress bars)
+- **Built-in player with subtitles done right** — ExoPlayer straight from Jellyfin (falls back to server transcoding), resume + progress sync, auto next episode. Subtitles are rendered by the launcher itself: **adjust timing live with the remote** (0.1 s steps, remember per season, or ask your agent to fix the file for good), outline / translucent / black-box styles, white / yellow, three sizes, overlapping lines merged, and the video's own subtitle tracks (incl. PGS) selectable. Audio track switching (works while transcoding too) and skip-intro (when your server has an intro-detection plugin)
 - **Ask** — talk to your own AI agent: hold OK and speak into the TV, press the remote's voice button (transcribed by the built-in Xiaomi assistant), or type
 - **Find / Downloads** — search for content, start a download, watch progress (implemented by your own backend)
 - **Debloat script** — disable preinstalled ad, analytics and push packages over ADB, fully reversible

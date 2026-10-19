@@ -97,6 +97,17 @@ public class PlayerActivity extends Activity {
     private boolean triedTranscode = false, finished = false;
     private long lastSaveMs = 0;
     private JSONObject nextPending;
+    /** 音轨（ExoPlayer 报上来的 AUDIO 组），面板「音轨」那一组用 */
+    private final List<Tracks.Group> audios = new ArrayList<>();
+    /** 服务器转码时 ExoPlayer 只看得到转出来的那一条音轨，换音轨得让 Jellyfin 按 AudioStreamIndex 重转 */
+    private final List<JSONObject> serverAudios = new ArrayList<>();
+    private int serverAudioIdx = -1;   // MediaStreams 里的 Index，打开时取 DefaultAudioStreamIndex
+    /** 片头 / 片尾段（Jellyfin MediaSegments，毫秒；没有为 -1） */
+    private long introStart = -1, introEnd = -1, outroStart = -1;
+    private boolean outroFired = false;
+    private TextView skipButton;
+    private ImageView barThumb;
+    private View dim;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -135,6 +146,9 @@ public class PlayerActivity extends Activity {
         finished = false;
         triedTranscode = false;
         nextPending = null;
+        introStart = introEnd = outroStart = -1;
+        outroFired = false;
+        if (skipButton != null) skipButton.setVisibility(View.GONE);
         showToast("正在打开…");
         new Thread(() -> {
             try {
@@ -154,14 +168,18 @@ public class PlayerActivity extends Activity {
         offsetKey = seriesId != null ? "offset:" + seriesId + ":" + it.optInt("ParentIndexNumber") : "offset:" + itemId;
         offsetMs = prefs.getLong("offset:item:" + itemId, prefs.getLong(offsetKey, 0));
         fillBar();
+        loadSegments(itemId);
 
         // 文本字幕：Jellyfin 能转 SRT 的（外挂 srt/ass + 内嵌文本轨）；图形字幕走「自带字幕轨」那一组
         textSubs.clear();
         embedded.clear();
+        serverAudios.clear();
+        serverAudioIdx = ms.optInt("DefaultAudioStreamIndex", -1);
         JSONArray streams = ms.optJSONArray("MediaStreams");
         for (int i = 0; streams != null && i < streams.length(); i++) {
             JSONObject s = streams.optJSONObject(i);
             if ("Subtitle".equals(s.optString("Type")) && s.optBoolean("IsTextSubtitleStream")) textSubs.add(s);
+            if ("Audio".equals(s.optString("Type"))) serverAudios.add(s);
         }
         int def = pickDefaultSub();
         subKind = def >= 0 ? 1 : 0;
@@ -184,7 +202,7 @@ public class PlayerActivity extends Activity {
                 @Override public void onIsPlayingChanged(boolean playing) { updateBarState(); }
                 @Override public void onPlaybackStateChanged(int state) { if (state == Player.STATE_ENDED) onEnded(); }
                 @Override public void onPlayerError(PlaybackException e) { onError(e); }
-                @Override public void onTracksChanged(Tracks t) { collectEmbedded(t); }
+                @Override public void onTracksChanged(Tracks t) { collectAudio(t); collectEmbedded(t); }
                 @Override public void onCues(CueGroup g) { if (subKind == 2) showEmbeddedCues(g.cues); }
             });
         }
@@ -204,7 +222,8 @@ public class PlayerActivity extends Activity {
             triedTranscode = true;
             long pos = Math.max(0, player.getCurrentPosition());
             showToast("这个文件电视直接放不了，换成服务器转码…");
-            play(jellyfin.transcodeUrl(itemId, mediaSourceId), MimeTypes.APPLICATION_M3U8, pos);
+            hideToastLater();
+            play(jellyfin.transcodeUrl(itemId, mediaSourceId, serverAudioIdx), MimeTypes.APPLICATION_M3U8, pos);
             return;
         }
         showToast("播放失败：" + e.getErrorCodeName());
@@ -311,6 +330,83 @@ public class PlayerActivity extends Activity {
         if (panel.getVisibility() == View.VISIBLE) rebuildPanel(false);
     }
 
+    private void collectAudio(Tracks t) {
+        audios.clear();
+        for (Tracks.Group g : t.getGroups()) if (g.getType() == C.TRACK_TYPE_AUDIO && g.isSupported()) audios.add(g);
+    }
+
+    /** 转码播放时换音轨：带着当前位置让服务器按新音轨重转。 */
+    private void selectServerAudio(JSONObject stream) {
+        if (player == null) return;
+        serverAudioIdx = stream.optInt("Index");
+        long pos = Math.max(0, player.getCurrentPosition());
+        play(jellyfin.transcodeUrl(itemId, mediaSourceId, serverAudioIdx), MimeTypes.APPLICATION_M3U8, pos);
+        showToast("音轨换成 " + stream.optString("DisplayTitle") + "…");
+        hideToastLater();
+        rebuildPanel(false);
+    }
+
+    private boolean serverAudioSelected(JSONObject stream) {
+        return stream.optInt("Index") == serverAudioIdx;
+    }
+
+    private void selectAudio(int idx) {
+        if (player == null || idx < 0 || idx >= audios.size()) return;
+        player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
+                .setOverrideForType(new TrackSelectionOverride(audios.get(idx).getMediaTrackGroup(), 0)).build());
+        ui.postDelayed(() -> rebuildPanel(false), 300);   // 等 onTracksChanged 回来再刷勾
+    }
+
+    /** 「英语 · 5.1」「国语 · 立体声」 */
+    private static String audioName(Tracks.Group g, int i) {
+        Format f = g.getTrackFormat(0);
+        String lang = f.language == null || "und".equals(f.language) ? "" : new Locale(f.language).getDisplayLanguage(Locale.CHINA);
+        String name = f.label != null && !f.label.isEmpty() ? f.label : lang.isEmpty() ? "音轨 " + (i + 1) : lang;
+        int ch = f.channelCount;
+        String layout = ch == 1 ? "单声道" : ch == 2 ? "立体声" : ch == 6 ? "5.1" : ch == 8 ? "7.1" : ch > 0 ? ch + " 声道" : "";
+        return layout.isEmpty() ? name : name + " · " + layout;
+    }
+
+    // ---------------------------------------------------------------- 片头 / 片尾
+
+    /** Jellyfin 10.10+ 的 MediaSegments：要装片头检测插件（Intro Skipper 等）才有数据，没有就什么都不显示。 */
+    private void loadSegments(String id) {
+        new Thread(() -> {
+            try {
+                JSONArray segs = jellyfin.mediaSegments(id);
+                ui.post(() -> {
+                    if (!id.equals(itemId)) return;
+                    for (int i = 0; i < segs.length(); i++) {
+                        JSONObject g = segs.optJSONObject(i);
+                        long a = g.optLong("StartTicks") / 10_000, b = g.optLong("EndTicks") / 10_000;
+                        if ("Intro".equals(g.optString("Type")) && b > a) { introStart = a; introEnd = b; }
+                        if ("Outro".equals(g.optString("Type")) && a > 0) outroStart = a;
+                    }
+                });
+            } catch (Exception ignored) {
+            }
+        }, "player-segments").start();
+    }
+
+    private void checkSegments(long pos) {
+        boolean inIntro = introEnd > 0 && pos >= introStart && pos < introEnd - 1500;
+        if (inIntro != (skipButton.getVisibility() == View.VISIBLE)) {
+            if (inIntro) { skipButton.setVisibility(View.VISIBLE); skipButton.setAlpha(0f); skipButton.animate().alpha(1f).setDuration(200).start(); }
+            else skipButton.setVisibility(View.GONE);
+        }
+        // 片尾开始：提前起「下一集」倒计时（返回键只取消倒计时，接着看片尾）
+        if (outroStart > 0 && !outroFired && seriesId != null && pos >= outroStart) {
+            outroFired = true;
+            onEnded();
+        }
+    }
+
+    private void skipIntro() {
+        if (player == null || introEnd <= 0) return;
+        player.seekTo(introEnd);
+        skipButton.setVisibility(View.GONE);
+    }
+
     private static String embeddedName(Tracks.Group g, int i) {
         Format f = g.getTrackFormat(0);
         String lang = f.language == null ? "" : new Locale(f.language).getDisplayLanguage(Locale.CHINA);
@@ -347,6 +443,7 @@ public class PlayerActivity extends Activity {
                 else if (subKind == 0) showCue(null);
                 if (bar.getVisibility() == View.VISIBLE) updateBar();
                 if (player.isPlaying()) saveProgress(false);
+                checkSegments(player.getCurrentPosition());
             }
             ui.postDelayed(this, 80);
         }
@@ -417,6 +514,7 @@ public class PlayerActivity extends Activity {
             case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
             case KeyEvent.KEYCODE_SPACE:
                 if (nextPending != null) { JSONObject n = nextPending; nextPending = null; open(n.optString("Id")); return true; }
+                if (skipButton.getVisibility() == View.VISIBLE && bar.getVisibility() != View.VISIBLE) { skipIntro(); return true; }
                 togglePause();
                 return true;
             case KeyEvent.KEYCODE_DPAD_LEFT:
@@ -449,7 +547,12 @@ public class PlayerActivity extends Activity {
     }
 
     private boolean onBack() {
-        if (nextPending != null) { nextPending = null; finish(); return true; }
+        if (nextPending != null) {
+            nextPending = null;
+            if (player != null && player.getPlaybackState() != Player.STATE_ENDED) { finished = false; hideToastNow(); return true; }   // 片尾里取消：接着看，真放完再问一次
+            finish();
+            return true;
+        }
         if (bar.getVisibility() == View.VISIBLE && player != null && player.isPlaying()) { hideBarNow(); return true; }
         finish();
         return true;
@@ -471,6 +574,10 @@ public class PlayerActivity extends Activity {
         root.setBackgroundColor(Color.BLACK);
         surface = new TextureView(this);
         root.addView(surface, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
+        dim = new View(this);
+        dim.setBackgroundColor(Color.BLACK);
+        dim.setAlpha(0f);
+        root.addView(dim, new FrameLayout.LayoutParams(-1, -1));
         // 触屏 / 鼠标（模拟器）：点画面 = 进度条没出来就显示，出来了就暂停 / 继续
         root.setOnClickListener(v -> {
             if (panel.getVisibility() == View.VISIBLE) closePanel();
@@ -506,6 +613,15 @@ public class PlayerActivity extends Activity {
         tp.topMargin = px(48);
         root.addView(toast, tp);
 
+        skipButton = Ui.text(this, "跳过片头  ›", 26, Color.BLACK, Typeface.DEFAULT_BOLD);
+        skipButton.setPadding(px(34), px(16), px(34), px(16));
+        skipButton.setBackground(Ui.rounded(0xF2FFFFFF, px(32)));
+        skipButton.setVisibility(View.GONE);
+        skipButton.setOnClickListener(v -> skipIntro());
+        FrameLayout.LayoutParams kp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.END);
+        kp.setMargins(0, 0, px(96), px(96));
+        root.addView(skipButton, kp);
+
         root.addView(buildBar(), new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
         root.addView(buildPanel(), new FrameLayout.LayoutParams(px(PANEL_W), -1, Gravity.END));
         return root;
@@ -535,6 +651,14 @@ public class PlayerActivity extends Activity {
 
         LinearLayout head = new LinearLayout(this);
         head.setGravity(Gravity.BOTTOM);
+        barThumb = new ImageView(this);
+        barThumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        barThumb.setClipToOutline(true);
+        barThumb.setBackground(Ui.rounded(0xFF1C1C1E, px(10)));
+        barThumb.setVisibility(View.GONE);
+        LinearLayout.LayoutParams thp = new LinearLayout.LayoutParams(px(176), px(99));
+        thp.rightMargin = px(28);
+        head.addView(barThumb, thp);
         LinearLayout titles = new LinearLayout(this);
         titles.setOrientation(LinearLayout.VERTICAL);
         barTitle = Ui.text(this, "", 44, Color.WHITE, Typeface.DEFAULT_BOLD);
@@ -578,7 +702,7 @@ public class PlayerActivity extends Activity {
 
         LinearLayout hints = new LinearLayout(this);
         hints.setPadding(0, px(24), 0, 0);
-        for (String[] h : new String[][]{{"‹ ›", "快退 / 快进"}, {"↑", "字幕"}, {"OK", "暂停"}, {"返回", "退出"}}) {
+        for (String[] h : new String[][]{{"‹ ›", "快退 / 快进"}, {"↑", "字幕 / 音轨"}, {"OK", "暂停"}, {"返回", "退出"}}) {
             hints.addView(Ui.chip(this, h[0], Color.WHITE, 0x33FFFFFF));
             TextView l = Ui.text(this, h[1], 22, Ui.TEXT_DIM, Typeface.DEFAULT);
             l.setPadding(0, px(2), px(34), 0);
@@ -588,7 +712,7 @@ public class PlayerActivity extends Activity {
         return bar;
     }
 
-    /** 右侧字幕面板：字幕轨（文本 / 自带）→ 时间（偏移、记到整季、永久修正）→ 样式（样式 / 颜色 / 字号）。 */
+    /** 右侧面板：音轨（多于一条才有）→ 字幕轨（文本 / 自带）→ 时间（偏移、记到整季、永久修正）→ 样式（样式 / 颜色 / 字号）。 */
     private View buildPanel() {
         panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
@@ -600,7 +724,7 @@ public class PlayerActivity extends Activity {
         ImageView ic = new ImageView(this);
         ic.setImageDrawable(new Icons(Icons.Kind.CHAT, Color.WHITE));
         head.addView(ic, new LinearLayout.LayoutParams(px(36), px(36)));
-        TextView t = Ui.text(this, "字幕", 40, Color.WHITE, Typeface.DEFAULT_BOLD);
+        TextView t = Ui.text(this, "字幕与音轨", 40, Color.WHITE, Typeface.DEFAULT_BOLD);
         t.setPadding(px(16), 0, 0, 0);
         head.addView(t);
         panel.addView(head);
@@ -621,6 +745,18 @@ public class PlayerActivity extends Activity {
         View focused = getCurrentFocus();
         int focusIdx = focused != null && focused.getParent() == panelList ? panelList.indexOfChild(focused) : -1;
         panelList.removeAllViews();
+
+        // 音轨放最上面：有的片子字幕轨二三十条，放后面就翻不到了
+        if (triedTranscode && serverAudios.size() > 1) {
+            section("音轨");
+            for (JSONObject a : serverAudios) choiceRow(a.optString("DisplayTitle").replace(" - 默认", ""), serverAudioSelected(a), () -> selectServerAudio(a));
+        } else if (audios.size() > 1) {
+            section("音轨");
+            for (int i = 0; i < audios.size(); i++) {
+                final int idx = i;
+                choiceRow(audioName(audios.get(i), i), audios.get(i).isSelected(), () -> selectAudio(idx));
+            }
+        }
 
         section("字幕轨");
         choiceRow("关闭字幕", subKind == 0, () -> selectSub(0, -1));
@@ -790,9 +926,27 @@ public class PlayerActivity extends Activity {
 
     private void fillBar() {
         boolean episode = item.optString("SeriesId", null) != null;
+        loadThumb(itemId, item);
         barTitle.setText(episode ? item.optString("SeriesName") : item.optString("Name"));
         barSub.setText(episode ? "第 " + item.optInt("ParentIndexNumber") + " 季 第 " + item.optInt("IndexNumber") + " 集 · " + item.optString("Name")
                 : (item.optInt("ProductionYear") > 0 ? item.optInt("ProductionYear") + " · 电影" : "电影"));
+    }
+
+    /** 单集截图（没有就用剧的横幅 / 电影的剧照）。 */
+    private void loadThumb(String id, JSONObject it) {
+        barThumb.setImageDrawable(null);
+        barThumb.setVisibility(View.GONE);
+        JSONObject tags = it.optJSONObject("ImageTags");
+        String path = tags != null && tags.has("Primary") && it.has("SeriesId") ? "/Items/" + id + "/Images/Primary?maxWidth=360&quality=85"
+                : it.has("SeriesId") ? "/Items/" + it.optString("SeriesId") + "/Images/Backdrop?maxWidth=360&quality=85"
+                : "/Items/" + id + "/Images/Backdrop?maxWidth=360&quality=85";
+        new Thread(() -> {
+            try {
+                Bitmap b = jellyfin.image(path);
+                if (b != null) ui.post(() -> { if (id.equals(itemId)) { barThumb.setImageBitmap(b); barThumb.setVisibility(View.VISIBLE); } });
+            } catch (Exception ignored) {
+            }
+        }, "player-thumb").start();
     }
 
     private void showBar() {
@@ -841,6 +995,7 @@ public class PlayerActivity extends Activity {
         if (barState == null || player == null) return;
         boolean playing = player.getPlayWhenReady();
         barState.setText(playing ? "▶  播放中" : "❚❚  已暂停");
+        dim.animate().alpha(playing ? 0f : 0.3f).setDuration(200).start();
         if (!playing && bar.getVisibility() != View.VISIBLE) showBar();
         if (!playing) ui.removeCallbacks(hideBar);
     }

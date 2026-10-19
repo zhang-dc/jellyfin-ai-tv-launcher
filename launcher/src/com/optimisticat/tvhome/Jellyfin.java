@@ -34,6 +34,7 @@ final class Jellyfin {
 
     static final class Item {
         String id, type, title, subtitle, imageUrl;
+        String seriesId;   // 单集所属的剧，别的为空
         float progress;   // 0~1，没看过为 0
     }
 
@@ -53,23 +54,65 @@ final class Jellyfin {
         server = prefs.getString("server", defaultServer);
     }
 
-    /** 最近播放：先放看到一半的，再放各剧的「下一集」（同一部剧只出现一次）。 */
+    /**
+     * 最近播放：「看到一半的」和「各剧下一集」合在一起，**按最后观看时间排**，同一部剧只留一张卡
+     * （有看到一半的集就放那一集，否则放下一集）。
+     *
+     * 2026-10-20 用户问「刚看的行尸走肉怎么不在首页」：一口气看完 S1E1~E3 都是「已看完」，不进 Resume，
+     * 只在 NextUp 里（还排第一）；而原来是先放满 Resume 再补 NextUp，Resume 里几个月前的旧条目正好凑够 12 条，
+     * NextUp 一条都没轮上。所以改成按时间合并。下一集的时间取「这部剧最近看完的那一集」和它自己的时间里较新的。
+     */
     List<Item> recentPlayed(int limit) throws Exception {
-        List<Item> out = new ArrayList<>();
-        Set<String> series = new HashSet<>();
-        JSONArray resume = getJson("/Users/" + userId + "/Items/Resume?Limit=" + limit
+        java.util.Map<String, Object[]> best = new java.util.LinkedHashMap<>();   // key -> {Item, lastPlayedMs}
+        JSONArray resume = getJson("/Users/" + userId + "/Items/Resume?Limit=" + (limit * 2)
                 + "&MediaTypes=Video&Fields=PrimaryImageAspectRatio").getJSONArray("Items");
-        for (int i = 0; i < resume.length() && out.size() < limit; i++) {
+        for (int i = 0; i < resume.length(); i++) {
             JSONObject o = resume.getJSONObject(i);
-            out.add(toItem(o, true));
-            if (o.has("SeriesId")) series.add(o.getString("SeriesId"));
+            String key = o.has("SeriesId") ? o.getString("SeriesId") : o.optString("Id");
+            long t = playedMs(o.optJSONObject("UserData"));
+            Object[] cur = best.get(key);
+            if (cur == null || (long) cur[1] < t) best.put(key, new Object[]{toItem(o, true), t});
         }
-        JSONArray next = getJson("/Shows/NextUp?userId=" + userId + "&Limit=" + limit).getJSONArray("Items");
-        for (int i = 0; i < next.length() && out.size() < limit; i++) {
+        JSONArray next = getJson("/Shows/NextUp?userId=" + userId + "&Limit=" + (limit * 2)).getJSONArray("Items");
+        // 剧的最后观看时间：Jellyfin 在「剧」这一层不记 LastPlayedDate（实测为空），只在单集上记。
+        // 一次取最近看完的一批单集，按剧取最新的那个时间。
+        java.util.Map<String, Long> seriesPlayed = new java.util.HashMap<>();
+        JSONArray played = getJson("/Users/" + userId + "/Items?Recursive=true&IncludeItemTypes=Episode&Filters=IsPlayed"
+                + "&SortBy=DatePlayed&SortOrder=Descending&Limit=200&Fields=UserData").optJSONArray("Items");
+        for (int i = 0; played != null && i < played.length(); i++) {
+            JSONObject o = played.getJSONObject(i);
+            String sid = o.optString("SeriesId");
+            if (!sid.isEmpty() && !seriesPlayed.containsKey(sid)) seriesPlayed.put(sid, playedMs(o.optJSONObject("UserData")));
+        }
+        for (int i = 0; i < next.length(); i++) {
             JSONObject o = next.getJSONObject(i);
-            if (series.add(o.optString("SeriesId"))) out.add(toItem(o, false));
+            String sid = o.optString("SeriesId");
+            if (sid.isEmpty() || best.containsKey(sid)) continue;   // 这部剧有看到一半的集，就放那一集
+            Long t = seriesPlayed.get(sid);
+            long own = playedMs(o.optJSONObject("UserData"));
+            best.put(sid, new Object[]{toItem(o, false), Math.max(t == null ? 0L : t, own)});
+        }
+        List<Object[]> all = new ArrayList<>(best.values());
+        java.util.Collections.sort(all, (x, y) -> Long.compare((long) y[1], (long) x[1]));
+        List<Item> out = new ArrayList<>();
+        for (Object[] e : all) {
+            if (out.size() >= limit) break;
+            out.add((Item) e[0]);
         }
         return out;
+    }
+
+    private static long playedMs(JSONObject userData) {
+        if (userData == null) return 0;
+        String d = userData.optString("LastPlayedDate", "");
+        if (d.length() < 19) return 0;
+        try {
+            java.text.SimpleDateFormat f = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US);
+            f.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+            return f.parse(d.substring(0, 19)).getTime();
+        } catch (java.text.ParseException e) {
+            return 0;
+        }
     }
 
     /** 最近下载（入库）：同一部剧的新集合并成一张剧集卡。 */
@@ -98,9 +141,10 @@ final class Jellyfin {
         return server + "/Videos/" + id + "/stream?static=true&mediaSourceId=" + mediaSourceId + "&api_key=" + apiKey;
     }
 
-    /** 放不了原文件时让服务器转成 H.264 + AAC 的 HLS（本机有显卡转码）。 */
-    String transcodeUrl(String id, String mediaSourceId) {
+    /** 放不了原文件时让服务器转成 H.264 + AAC 的 HLS（本机有显卡转码）。audioStreamIndex = MediaStreams 里的 Index，-1 用默认音轨。 */
+    String transcodeUrl(String id, String mediaSourceId, int audioStreamIndex) {
         return server + "/Videos/" + id + "/master.m3u8?mediaSourceId=" + mediaSourceId + "&api_key=" + apiKey
+                + (audioStreamIndex >= 0 ? "&AudioStreamIndex=" + audioStreamIndex : "")
                 + "&VideoCodec=h264&AudioCodec=aac&TranscodingMaxAudioChannels=2&SegmentContainer=ts&DeviceId=tvhome&PlaySessionId="
                 + Long.toHexString(System.nanoTime());
     }
@@ -125,11 +169,39 @@ final class Jellyfin {
         post("/UserItems/" + id + "/UserData?userId=" + userId, body.toString());
     }
 
+    /** 片头 / 片尾段（Jellyfin 10.10+，需片头检测插件；没有返回空数组）。 */
+    JSONArray mediaSegments(String id) throws Exception {
+        JSONArray a = getJson("/MediaSegments/" + id).optJSONArray("Items");
+        return a != null ? a : new JSONArray();
+    }
+
     /** 同一部剧里紧接着的下一集；没有返回 null。 */
     JSONObject nextEpisode(String seriesId, String currentId) throws Exception {
         JSONArray eps = getJson("/Shows/" + seriesId + "/Episodes?userId=" + userId + "&startItemId=" + currentId + "&Limit=2")
                 .optJSONArray("Items");
         return eps != null && eps.length() > 1 ? eps.getJSONObject(1) : null;
+    }
+
+// ---------------------------------------------------------------- 剧集详情页用（SeriesActivity）
+
+    /** 这部剧的各季（含特别篇「第 0 季」）。 */
+    JSONArray seasons(String seriesId) throws Exception {
+        JSONArray a = getJson("/Shows/" + seriesId + "/Seasons?userId=" + userId + "&Fields=UserData").optJSONArray("Items");
+        return a != null ? a : new JSONArray();
+    }
+
+    /** 某一季的全部单集，带简介、进度、截图标记。 */
+    JSONArray episodes(String seriesId, String seasonId) throws Exception {
+        JSONArray a = getJson("/Shows/" + seriesId + "/Episodes?userId=" + userId + "&seasonId=" + seasonId
+                + "&Fields=Overview,UserData").optJSONArray("Items");
+        return a != null ? a : new JSONArray();
+    }
+
+    /** 这部剧该接着看哪一集（看到一半的那集，或者看完那集的下一集）；一集没看过返回 null。 */
+    JSONObject nextUp(String seriesId) throws Exception {
+        JSONArray a = getJson("/Shows/NextUp?userId=" + userId + "&seriesId=" + seriesId + "&Limit=1&enableResumable=true")
+                .optJSONArray("Items");
+        return a != null && a.length() > 0 ? a.getJSONObject(0) : null;
     }
 
     private static String iso(long ms) {
@@ -174,6 +246,7 @@ final class Jellyfin {
         it.type = type;
         JSONObject tags = o.optJSONObject("ImageTags");
         if ("Episode".equals(type)) {
+            it.seriesId = o.optString("SeriesId");
             it.title = o.optString("SeriesName");
             String se = "S" + o.optInt("ParentIndexNumber") + "E" + o.optInt("IndexNumber");
             it.subtitle = se + " · " + o.optString("Name");

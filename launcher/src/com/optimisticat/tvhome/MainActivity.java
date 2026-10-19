@@ -75,8 +75,10 @@ public class MainActivity extends Activity {
     private static final String JELLYFIN_STARTUP = "org.jellyfin.androidtv.ui.startup.StartupActivity";
 
     private static final int BG = 0xFF000000;
+    /** 首屏卡片行上方留给大广告位文字的高度 */
+    private static final int HERO_H = 560;
     private static final int TEXT_DIM = 0xFF8E8E93;
-    private static final int CARD_W = 352, CARD_H = 198, TILE_W = 256, TILE_H = 144, GAP = 28;
+    private static final int CARD_W = 300, CARD_H = 169, TILE_W = 256, TILE_H = 144, GAP = 28;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService io = Executors.newFixedThreadPool(3);
@@ -87,13 +89,14 @@ public class MainActivity extends Activity {
     private Jellyfin jellyfin;
     private Gateway gateway;
 
-    private TextView greetingView, timeView, dateView, focusTitle, playedLabel, addedLabel, allLabel;
+    private TextView timeView, dateView, focusTitle, playedLabel, addedLabel, allLabel;
     private LinearLayout header, actions, dock, playedRow, addedRow, downloadingRow;
     private HorizontalScrollView playedScroll, addedScroll, downloadingScroll;
     private TextView downloadingLabel;
     private GridLayout grid;
     private ScrollView scroller;
     private View glow, firstDockTile;
+    private HeroView hero;
     private String appsSignature = "", playedSignature = "", addedSignature = "";
     /** 回到桌面后用户还没按过方向键：数据到了就把焦点放到「最近播放」第一张。 */
     private boolean untouched = true;
@@ -147,6 +150,7 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         super.onDestroy();
         io.shutdownNow();
+        if (hero != null) hero.release();
     }
 
     /** 已经在桌面时再按主页键：回到顶部、焦点回默认位置。 */
@@ -182,6 +186,10 @@ public class MainActivity extends Activity {
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(BG);
 
+        // 影院式大广告位：焦点所在剧集的剧照铺满全屏（docs/ui-v2-design.md §1）
+        hero = new HeroView(this, jellyfin);
+        root.addView(hero, new FrameLayout.LayoutParams(-1, -1));
+
         // 光晕：一块径向渐变，跟着焦点移动、变色
         glow = new View(this);
         root.addView(glow, new FrameLayout.LayoutParams(dp(760), dp(520)));
@@ -205,8 +213,8 @@ public class MainActivity extends Activity {
         scroller.addView(body);
         root.addView(scroller, new FrameLayout.LayoutParams(-1, -1));
 
-        // 顶部留出时钟的位置
-        body.addView(new View(this), new LinearLayout.LayoutParams(-1, dp(318)));
+        // 顶部留给大广告位的剧名和简介
+        body.addView(new View(this), new LinearLayout.LayoutParams(-1, dp(HERO_H)));
 
         playedLabel = sectionLabel("最近播放", 0);
         body.addView(playedLabel);
@@ -250,25 +258,24 @@ public class MainActivity extends Activity {
 
         setJellyfinVisible(false);
 
-        // 左上：问候 / 时间 / 日期
-        header = new LinearLayout(this);
-        header.setOrientation(LinearLayout.VERTICAL);
-        header.setPadding(dp(96), dp(56), 0, 0);
-        greetingView = text("", 30, TEXT_DIM, Typeface.DEFAULT);
-        timeView = text("", 120, Color.WHITE, Typeface.create("sans-serif-thin", Typeface.NORMAL));
-        timeView.setIncludeFontPadding(false);
-        dateView = text("", 28, TEXT_DIM, Typeface.DEFAULT);
-        header.addView(greetingView);
-        header.addView(timeView);
-        header.addView(dateView);
-        root.addView(header, new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START));
-
         // 右上：圆形图标按钮，文字只在选中时出现（问问 · 找剧 · 下载 · 信号源 · 设置）
         actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
         actions.setPadding(0, dp(64), dp(80), 0);
         actions.setClipChildren(false);
         actions.setClipToPadding(false);
+        // 时钟缩到按钮左边，小字
+        header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.VERTICAL);
+        header.setGravity(Gravity.END);
+        header.setPadding(0, dp(8), dp(28), 0);
+        timeView = text("", 34, Color.WHITE, Typeface.DEFAULT_BOLD);
+        timeView.setIncludeFontPadding(false);
+        dateView = text("", 20, 0xFFC7C7CC, Typeface.DEFAULT);
+        dateView.setPadding(0, dp(4), 0, 0);
+        header.addView(timeView);
+        header.addView(dateView);
+        actions.addView(header);
         if (gateway != null) {
             actions.addView(topButton(Icons.Kind.CHAT, "问问", v -> startActivity(new Intent(this, AgentActivity.class))));
             actions.addView(topButton(Icons.Kind.SEARCH, "找剧", v -> startActivity(new Intent(this, SearchActivity.class))));
@@ -278,11 +285,11 @@ public class MainActivity extends Activity {
         actions.addView(topButton(Icons.Kind.SETTINGS, "设置", v -> openSettings()));
         root.addView(actions, new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END));
 
-        // 往下翻时左上角时钟淡出，免得压在内容上
+        // 往下翻时顶栏淡出、大广告位文字淡出剧照压暗，免得压在内容上
         scroller.getViewTreeObserver().addOnScrollChangedListener(() -> {
             float a = 1f - Math.min(1f, scroller.getScrollY() / (float) dp(220));
-            header.setAlpha(a);
             actions.setAlpha(a);
+            hero.setScrollFade(Math.min(1f, scroller.getScrollY() / (float) dp(HERO_H - 120)));
         });
         return root;
     }
@@ -421,11 +428,7 @@ public class MainActivity extends Activity {
         ImageView iv = new ImageView(this);
         iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
         c.addView(iv, new FrameLayout.LayoutParams(-1, -1));
-        final int[] tint = {0xFF3A6EA5};   // 图片没到之前的默认光晕色
-        loadImage(it.imageUrl, iv, b -> {
-            tint[0] = dominantColor(new android.graphics.drawable.BitmapDrawable(getResources(), b));
-            if (c.hasFocus()) moveGlow(c, tint[0]);
-        });
+        loadImage(it.imageUrl, iv, b -> { });
 
         View shade = new View(this);
         GradientDrawable g = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
@@ -465,10 +468,13 @@ public class MainActivity extends Activity {
             if (has) {
                 focusTitle.setText("");
                 scrollFor(top ? null : addedLabel, v);
-                moveGlow(v, tint[0]);
+                glow.animate().alpha(0f).setDuration(160).start();   // 剧照本身就是氛围，不叠光晕
+                hero.show(it);
             }
         });
         c.setOnClickListener(v -> openItem(it));
+        // 长按确认键：单集卡进这部剧的选集页
+        if (it.seriesId != null && !it.seriesId.isEmpty()) c.setOnLongClickListener(v -> { SeriesActivity.open(this, it.seriesId); return true; });
         return c;
     }
 
@@ -496,6 +502,7 @@ public class MainActivity extends Activity {
     /** 单集 / 电影用自己的播放器直接开播（字幕能现场调）；整部剧的卡片还是交给 Jellyfin 详情页选集。 */
     private void openItem(Jellyfin.Item it) {
         if ("Episode".equals(it.type) || "Movie".equals(it.type)) PlayerActivity.play(this, it.id);
+        else if ("Series".equals(it.type)) SeriesActivity.open(this, it.id);
         else openInJellyfin(it.id);
     }
 
@@ -851,11 +858,8 @@ public class MainActivity extends Activity {
 
     private void tickClock() {
         Date now = new Date();
-        int h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
-        String greet = h < 5 ? "夜深了" : h < 11 ? "早上好" : h < 13 ? "中午好" : h < 18 ? "下午好" : "晚上好";
-        greetingView.setText(greet);
         timeView.setText(new SimpleDateFormat("HH:mm", Locale.CHINA).format(now));
-        dateView.setText(new SimpleDateFormat("M月d日 EEEE", Locale.CHINA).format(now));
+        dateView.setText(new SimpleDateFormat("M月d日 EEE", Locale.CHINA).format(now));
     }
 
     // ---------------------------------------------------------------- 工具

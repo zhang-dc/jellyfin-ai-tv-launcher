@@ -47,6 +47,7 @@
         <activity android:name=".PlayerActivity" android:exported="true" android:screenOrientation="landscape"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|uiMode" />
         <activity android:name=".DownloadsActivity" android:screenOrientation="landscape" />
+        <activity android:name=".SeriesActivity" android:exported="true" android:screenOrientation="landscape" />
 
         <!-- 国内版小米电视不让第三方当默认桌面：靠无障碍服务把主页键接过来，见 HomeKeyService -->
         <service

@@ -52,8 +52,19 @@ userId=<第 2 步的用户 ID>
 | 各剧的下一集 | `GET /Shows/NextUp?userId={userId}` |
 | 最近入库 | `GET /Users/{userId}/Items/Latest?IncludeItemTypes=Episode,Movie&GroupItems=true` |
 | 图片 | `GET /Items/{id}/Images/{Primary|Thumb|Backdrop}?maxWidth=480` |
+| 首页大广告位 | `GET /Users/{userId}/Items/{id}`（简介、评分、类型）+ `/Items/{seriesId}/Images/Backdrop?maxWidth=1920`、`/Images/Logo?maxWidth=640` |
 
 点卡片打开那一集：启动 `org.jellyfin.androidtv/.ui.startup.StartupActivity`，带 extra `ItemId=<条目ID>`。这是 Jellyfin 客户端自己首页频道用的入口，会直接进到详情页。
+
+## 剧集详情 / 选集页用到的接口
+
+整部剧的卡片进 `SeriesActivity.java`，单集卡长按确认键也能进：
+
+| 用途 | 接口 |
+|---|---|
+| 各季 | `GET /Shows/{seriesId}/Seasons?userId=…` |
+| 某季的单集 | `GET /Shows/{seriesId}/Episodes?userId=…&seasonId=…&Fields=Overview,UserData` |
+| 接着看哪一集 | `GET /Shows/NextUp?userId=…&seriesId=…&enableResumable=true`（一集没看过时为空，从第 1 季第 1 集开始） |
 
 ## 内置播放器用到的接口
 
@@ -66,6 +77,8 @@ userId=<第 2 步的用户 ID>
 | 放不了时转码 | `GET /Videos/{id}/master.m3u8?mediaSourceId=…&VideoCodec=h264&AudioCodec=aac&api_key=…` |
 | 字幕转成 SRT | `GET /Videos/{id}/{mediaSourceId}/Subtitles/{streamIndex}/0/Stream.srt`（外挂 srt/ass 和内嵌文本轨都能转） |
 | 下一集 | `GET /Shows/{seriesId}/Episodes?userId=…&startItemId={当前集}&Limit=2` |
+| 换音轨（转码时） | 同上 `master.m3u8`，加 `&AudioStreamIndex={MediaStreams 里的 Index}`，带当前位置重新打开 |
+| 片头 / 片尾 | `GET /MediaSegments/{id}`（Jellyfin 10.10+，要装片头检测插件才有数据；没有就不显示「跳过片头」） |
 | 存进度 / 看完 | `POST /UserItems/{id}/UserData?userId=…`，body `{"PlaybackPositionTicks":…,"Played":…,"LastPlayedDate":"…"}` |
 
 > **坑**：在 Jellyfin 10.11 上用 API 密钥调 `/PlayingItems/{id}`（开始 / 进度 / 停止上报），都返回 204，但**进度不会落库**，因为 API 密钥不绑定用户会话。直接写 `UserData` 才生效，首页「最近播放」靠的就是它。

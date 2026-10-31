@@ -81,7 +81,19 @@ public class PlayerActivity extends Activity {
     private static final int STILL_WATCHING_AFTER = 3;
     private static final int[] SUB_SIZES = {44, 54, 66};
     private static final String[] SIZE_NAMES = {"小", "中", "大"};
-    private static final String[] STYLE_NAMES = {"描边", "半透明底", "黑底"};
+    private static final String[] FONT_NAMES = {"小米兰亭", "思源黑体"};
+    private static final String[] WEIGHT_NAMES = {"常规", "中", "粗"};
+    /** 描边粗细占字号的比例。2026-10-31 用户嫌字「太粗糊成一团」：原来固定半粗体 + 11% 描边，现在默认常规体 + 5% */
+    private static final String[] OUTLINE_NAMES = {"无", "细", "中", "粗"};
+    private static final float[] OUTLINE_RATIO = {0f, 0.05f, 0.08f, 0.11f};
+    private static final String[] BG_NAMES = {"无", "半透明", "黑底"};
+    /** 画质：第 0 项「原画」= 直接播放原文件；其余让服务器按宽度 / 码率上限出 HLS。只对这次播放有效，不记住 */
+    private static final String[] QUALITY_NAMES = {"原画", "1080p · 20 Mbps", "1080p · 10 Mbps", "720p · 6 Mbps", "720p · 3 Mbps", "480p · 1.5 Mbps"};
+    private static final String[] QUALITY_SHORT = {"原画", "1080p 20M", "1080p 10M", "720p 6M", "720p 3M", "480p"};
+    private static final int[] QUALITY_W = {3840, 1920, 1920, 1280, 1280, 854};
+    private static final int[] QUALITY_BPS = {40_000_000, 20_000_000, 10_000_000, 6_000_000, 3_000_000, 1_500_000};
+    /** 调字幕样式时画面上正好没字幕，就先显示这一句看效果 */
+    private static final SubtitleEngine.Cue PREVIEW_CUE = new SubtitleEngine.Cue(0, 0, "字幕样式预览：这是一句示例台词", "This is how the subtitles will look");
     private static final String[] COLOR_NAMES = {"白色", "黄色"};
     private static final int[] COLORS = {Color.WHITE, 0xFFFFE066};
     /** 字幕离底边的高度：低 = 贴底；高 = 宽银幕电影放到画面里面 */
@@ -111,7 +123,7 @@ public class PlayerActivity extends Activity {
     private FrameLayout track;
     private final List<View> chapterTicks = new ArrayList<>();
     private TextView barTitle, barSub, barPos, barLeft, toast;
-    private TextView ctlNext, ctlEpisodes, ctlSpeed, ctlSync;
+    private TextView ctlNext, ctlEpisodes, ctlSpeed, ctlSync, ctlQuality;
     private final SubtitleEngine subs = new SubtitleEngine();
     private SharedPreferences prefs;
 
@@ -126,7 +138,11 @@ public class PlayerActivity extends Activity {
     /** 当前选择：kind 0 = 关闭，1 = 文本字幕 textSubs[idx]，2 = 自带轨 embedded[idx]。 */
     private int subKind = 0, subIdx = -1;
     private long offsetMs = 0;
-    private int sizeIdx, styleIdx, colorIdx, posIdx, speedIdx = 1;
+    private int sizeIdx, fontIdx, weightIdx, outlineIdx, bgIdx, colorIdx, posIdx, speedIdx = 1, qualityIdx = 0;
+    /** 这一集原文件直接播放出过错（之后「原画」也只能走服务器转码） */
+    private boolean directFailed = false;
+    private long previewUntil = 0;
+    private final Typeface[] fontCache = new Typeface[6];
     private boolean triedTranscode = false, finished = false;
     /** 当前在放的地址（网络出错时原样重连用）和连着重连了几次 */
     private String lastUrl, lastMime;
@@ -187,7 +203,10 @@ public class PlayerActivity extends Activity {
         noSave = getIntent().getBooleanExtra(EXTRA_NO_SAVE, false);
         prefs = getSharedPreferences("player", Context.MODE_PRIVATE);
         sizeIdx = prefs.getInt("subSize", 1);
-        styleIdx = prefs.getInt("subStyle", 0);
+        fontIdx = Math.min(FONT_NAMES.length - 1, prefs.getInt("subFont", 0));
+        weightIdx = Math.min(WEIGHT_NAMES.length - 1, prefs.getInt("subWeight", 0));
+        outlineIdx = Math.min(OUTLINE_NAMES.length - 1, prefs.getInt("subOutline", 1));
+        bgIdx = Math.min(BG_NAMES.length - 1, prefs.getInt("subBg", 0));
         colorIdx = prefs.getInt("subColor", 0);
         posIdx = Math.min(SUB_BOTTOM.length - 1, prefs.getInt("subPos", 0));
         setContentView(build());
@@ -233,6 +252,7 @@ public class PlayerActivity extends Activity {
         if (player != null) player.stop();   // 上一集别在加载新一集时接着放（也别被当成新一集存进度）
         finished = false;
         triedTranscode = false;
+        directFailed = false;
         ioRetries = 0;
         scrubbing = false;
         introStart = introEnd = creditsStart = -1;
@@ -296,9 +316,9 @@ public class PlayerActivity extends Activity {
         long resumeMs = it.optJSONObject("UserData") != null ? it.optJSONObject("UserData").optLong("PlaybackPositionTicks") / 10_000 : 0;
         long runMs = it.optLong("RunTimeTicks") / 10_000;
         if (resumeMs < 30_000 || (runMs > 0 && resumeMs > runMs * 0.95)) resumeMs = 0;   // 刚开头 / 快看完的从头放
-        if (getIntent().getBooleanExtra(EXTRA_FORCE_TRANSCODE, false)) {
+        if (getIntent().getBooleanExtra(EXTRA_FORCE_TRANSCODE, false) || qualityIdx > 0) {
             triedTranscode = true;
-            play(jellyfin.transcodeUrl(itemId, mediaSourceId, serverAudioIdx), MimeTypes.APPLICATION_M3U8, resumeMs);
+            play(qualityUrl(), MimeTypes.APPLICATION_M3U8, resumeMs);
             fillTags(ms);
         } else {
             play(jellyfin.streamUrl(itemId, mediaSourceId), null, resumeMs);
@@ -353,9 +373,10 @@ public class PlayerActivity extends Activity {
         }
         if (!triedTranscode) {
             triedTranscode = true;
+            directFailed = true;
             showToast("这个文件电视直接放不了（" + e.getErrorCodeName() + "），换成服务器转码…");
             hideToastLater();
-            play(jellyfin.transcodeUrl(itemId, mediaSourceId, serverAudioIdx), MimeTypes.APPLICATION_M3U8, pos);
+            play(qualityUrl(), MimeTypes.APPLICATION_M3U8, pos);
             if (item != null) fillTags(item.optJSONArray("MediaSources").optJSONObject(0));
             return;
         }
@@ -462,7 +483,7 @@ public class PlayerActivity extends Activity {
         if (player == null) return;
         serverAudioIdx = stream.optInt("Index");
         long pos = Math.max(0, player.getCurrentPosition());
-        play(jellyfin.transcodeUrl(itemId, mediaSourceId, serverAudioIdx), MimeTypes.APPLICATION_M3U8, pos);
+        play(qualityUrl(), MimeTypes.APPLICATION_M3U8, pos);
         showToast("音轨换成 " + stream.optString("DisplayTitle") + "…");
         hideToastLater();
         rebuildPanel(false);
@@ -591,8 +612,11 @@ public class PlayerActivity extends Activity {
     private final Runnable tick = new Runnable() {
         @Override public void run() {
             if (player != null) {
-                if (subKind == 1) showCue(subs.size() == 0 ? null : subs.at(player.getCurrentPosition(), offsetMs));
-                else if (subKind == 0) showCue(null);
+                if (subKind != 2) {
+                    SubtitleEngine.Cue c = subKind == 1 && subs.size() > 0 ? subs.at(player.getCurrentPosition(), offsetMs) : null;
+                    if (c == null && SystemClock.uptimeMillis() < previewUntil) c = PREVIEW_CUE;
+                    showCue(c);
+                }
                 if (bar.getVisibility() == View.VISIBLE) updateBar();
                 if (player.isPlaying()) saveProgress(false);
                 checkSegments(player.getCurrentPosition());
@@ -615,7 +639,7 @@ public class PlayerActivity extends Activity {
         subBox.setVisibility(View.VISIBLE);
     }
 
-    /** 三种样式：描边无底 / 半透明底 / 黑底；颜色白 / 黄；三档字号；三档高度。 */
+    /** 字体 × 字重、描边粗细、背景（无 / 半透明 / 黑底）、颜色、字号、高度。 */
     private void applyStyle() {
         float px = Ui.px(this, SUB_SIZES[sizeIdx]);
         subPrimary.setTextSize(TypedValue.COMPLEX_UNIT_PX, px);
@@ -623,19 +647,45 @@ public class PlayerActivity extends Activity {
         int color = COLORS[colorIdx];
         subPrimary.setTextColor(color);
         subSecondary.setTextColor(colorIdx == 0 ? 0xFFE5E5EA : 0xFFFFF0A8);
-        boolean outline = styleIdx == 0;
-        float stroke = outline ? Math.max(3f, px * 0.11f) : 0;
+        subPrimary.setTypeface(subFont(fontIdx, weightIdx));
+        subSecondary.setTypeface(subFont(fontIdx, 0));
+        float stroke = OUTLINE_RATIO[outlineIdx] == 0 ? 0 : Math.max(2f, px * OUTLINE_RATIO[outlineIdx]);
         subPrimary.setOutline(stroke, 0xFF000000);
         subSecondary.setOutline(stroke * 0.8f, 0xFF000000);
-        float shadow = outline ? px * 0.06f : 0;
+        float shadow = bgIdx == 0 ? px * 0.05f : 0;   // 没有底色时留一层柔和阴影，细描边 / 无描边在亮画面上也看得清
         subPrimary.setShadowLayer(shadow, 0, shadow * 0.5f, 0xCC000000);
         subSecondary.setShadowLayer(shadow, 0, shadow * 0.5f, 0xCC000000);
-        subBox.setBackground(styleIdx == 0 ? null : Ui.rounded(styleIdx == 1 ? 0x80000000 : 0xFF000000, px(12)));
+        subBox.setBackground(bgIdx == 0 ? null : Ui.rounded(bgIdx == 1 ? 0x80000000 : 0xFF000000, px(12)));
         ((FrameLayout.LayoutParams) subBox.getLayoutParams()).bottomMargin = px(SUB_BOTTOM[posIdx]);
         ((FrameLayout.LayoutParams) subImage.getLayoutParams()).bottomMargin = px(SUB_BOTTOM[posIdx] - 4);
         subBox.requestLayout();
         subImage.requestLayout();
         shown = null;
+    }
+
+    /**
+     * 字幕字体。小米电视自带小米兰亭 Pro 的常规 / 中粗 / 半粗三个真字重文件（/system/fonts/MILanPro_*.ttf）；
+     * 思源黑体（NotoSansCJK，ttc 第 2 个是简体）只有常规，中 / 粗靠系统合成。文件不在（模拟器）就退回系统无衬线体。
+     */
+    private Typeface subFont(int font, int weight) {
+        int k = font * 3 + weight;
+        if (fontCache[k] != null) return fontCache[k];
+        int w = weight == 0 ? 400 : weight == 1 ? 500 : 700;
+        Typeface tf = null;
+        try {
+            if (font == 0) {
+                java.io.File f = new java.io.File("/system/fonts/" + (weight == 0 ? "MILanPro_Normal.ttf" : weight == 1 ? "MILanPro_Medium.ttf" : "MILanPro_SemiBold.ttf"));
+                if (f.exists()) tf = Typeface.createFromFile(f);
+            } else {
+                java.io.File f = new java.io.File("/system/fonts/NotoSansCJK-Regular.ttc");
+                if (f.exists()) tf = new Typeface.Builder(f).setTtcIndex(2).build();
+                if (tf != null && weight > 0 && android.os.Build.VERSION.SDK_INT >= 28) tf = Typeface.create(tf, w, false);
+            }
+        } catch (Exception ignored) {
+        }
+        if (tf == null) tf = android.os.Build.VERSION.SDK_INT >= 28 ? Typeface.create(Typeface.SANS_SERIF, w, false)
+                : Typeface.create(Typeface.SANS_SERIF, weight == 2 ? Typeface.BOLD : Typeface.NORMAL);
+        return fontCache[k] = tf;
     }
 
     /** 调字幕时间：这一集记一份，同时作为这一季的默认值（同一季的片源 / 字幕通常差得一样）。 */
@@ -1098,6 +1148,39 @@ public class PlayerActivity extends Activity {
         showBar();   // 焦点进了按钮行再算自动收起的时间（按钮行里停留时间长一些）
     }
 
+    /** 当前画质对应的服务器转码地址（「原画」= 原分辨率，HEVC / H.264 原样复制） */
+    private String qualityUrl() {
+        return jellyfin.transcodeUrl(itemId, mediaSourceId, serverAudioIdx, QUALITY_W[qualityIdx], QUALITY_BPS[qualityIdx]);
+    }
+
+    /** 画质弹窗：原画后面写上片源本身的码率，选比它高的没意义 */
+    private void chooseQuality() {
+        if (item == null) return;
+        JSONObject ms = item.optJSONArray("MediaSources").optJSONObject(0);
+        String[] opts = new String[QUALITY_NAMES.length];
+        for (int i = 0; i < opts.length; i++) opts[i] = (i == qualityIdx ? "✓  " : "") + QUALITY_NAMES[i];
+        long bps = ms.optLong("Bitrate");
+        if (bps > 0) opts[0] += String.format(Locale.US, "（片源 %.1f Mbps）", bps / 1e6);
+        Ui.choose(this, "画质", "家里网络一般选原画；卡顿或在外面看时往下选。只对这次播放有效。", opts, null, this::setQuality);
+    }
+
+    private void setQuality(int idx) {
+        if (player == null || idx == qualityIdx) return;
+        qualityIdx = idx;
+        long pos = Math.max(0, player.getCurrentPosition());
+        if (idx == 0 && !directFailed) {
+            triedTranscode = false;
+            play(jellyfin.streamUrl(itemId, mediaSourceId), null, pos);
+        } else {
+            triedTranscode = true;
+            play(qualityUrl(), MimeTypes.APPLICATION_M3U8, pos);
+        }
+        updateControls();
+        fillTags(item.optJSONArray("MediaSources").optJSONObject(0));
+        showToast("画质：" + QUALITY_NAMES[idx]);
+        hideToastLater();
+    }
+
     private void cycleSpeed() {
         speedIdx = (speedIdx + 1) % SPEEDS.length;
         if (player != null) player.setPlaybackSpeed(SPEEDS[speedIdx]);
@@ -1294,6 +1377,8 @@ public class PlayerActivity extends Activity {
         controls.addView(ctlEpisodes);
         ctlNext = ctlButton("下一集  ›", v -> playNext(false));
         controls.addView(ctlNext);
+        ctlQuality = ctlButton("画质 原画", v -> chooseQuality());
+        controls.addView(ctlQuality);
         ctlSpeed = ctlButton("倍速 1.0×", v -> cycleSpeed());
         controls.addView(ctlSpeed);
         lower.addView(controls, new LinearLayout.LayoutParams(0, -2, 1));
@@ -1331,6 +1416,7 @@ public class PlayerActivity extends Activity {
         boolean episode = seriesId != null;
         ctlEpisodes.setVisibility(episode && seasonId != null ? View.VISIBLE : View.GONE);
         ctlNext.setVisibility(episode && nextEp != null ? View.VISIBLE : View.GONE);
+        ctlQuality.setText("画质 " + QUALITY_SHORT[qualityIdx]);
         ctlSpeed.setText("倍速 " + (SPEEDS[speedIdx] == 1f ? "1.0" : String.valueOf(SPEEDS[speedIdx])) + "×");
     }
 
@@ -1545,8 +1631,15 @@ public class PlayerActivity extends Activity {
         actionRow("对齐台词（听到哪句选哪句）", this::openSync);
         actionRow("让 Agent 把字幕文件永久修正", this::askAgentToFix);
 
-        section("样式");
-        valueRow("样式", STYLE_NAMES[styleIdx], () -> cycleStyle(-1), () -> cycleStyle(1));
+        section("字幕样式");
+        valueRow("字体", FONT_NAMES[fontIdx], () -> { fontIdx = wrap(fontIdx - 1, FONT_NAMES.length); setStyle("subFont", fontIdx); },
+                () -> { fontIdx = wrap(fontIdx + 1, FONT_NAMES.length); setStyle("subFont", fontIdx); });
+        valueRow("字重", WEIGHT_NAMES[weightIdx], () -> { weightIdx = clampIdx(weightIdx - 1, WEIGHT_NAMES.length); setStyle("subWeight", weightIdx); },
+                () -> { weightIdx = clampIdx(weightIdx + 1, WEIGHT_NAMES.length); setStyle("subWeight", weightIdx); });
+        valueRow("描边", OUTLINE_NAMES[outlineIdx], () -> { outlineIdx = clampIdx(outlineIdx - 1, OUTLINE_NAMES.length); setStyle("subOutline", outlineIdx); },
+                () -> { outlineIdx = clampIdx(outlineIdx + 1, OUTLINE_NAMES.length); setStyle("subOutline", outlineIdx); });
+        valueRow("背景", BG_NAMES[bgIdx], () -> { bgIdx = wrap(bgIdx - 1, BG_NAMES.length); setStyle("subBg", bgIdx); },
+                () -> { bgIdx = wrap(bgIdx + 1, BG_NAMES.length); setStyle("subBg", bgIdx); });
         valueRow("颜色", COLOR_NAMES[colorIdx], () -> cycleColor(-1), () -> cycleColor(1));
         valueRow("字号", SIZE_NAMES[sizeIdx], () -> cycleSize(-1), () -> cycleSize(1));
         valueRow("位置", POS_NAMES[posIdx], () -> cyclePos(-1), () -> cyclePos(1));
@@ -1560,10 +1653,20 @@ public class PlayerActivity extends Activity {
         return null;
     }
 
-    private void cycleStyle(int d) { styleIdx = (styleIdx + d + STYLE_NAMES.length) % STYLE_NAMES.length; prefs.edit().putInt("subStyle", styleIdx).apply(); applyStyle(); rebuildPanel(false); }
-    private void cycleColor(int d) { colorIdx = (colorIdx + d + COLOR_NAMES.length) % COLOR_NAMES.length; prefs.edit().putInt("subColor", colorIdx).apply(); applyStyle(); rebuildPanel(false); }
-    private void cycleSize(int d) { sizeIdx = Math.max(0, Math.min(SIZE_NAMES.length - 1, sizeIdx + d)); prefs.edit().putInt("subSize", sizeIdx).apply(); applyStyle(); rebuildPanel(false); }
-    private void cyclePos(int d) { posIdx = Math.max(0, Math.min(POS_NAMES.length - 1, posIdx + d)); prefs.edit().putInt("subPos", posIdx).apply(); applyStyle(); rebuildPanel(false); }
+    private void cycleColor(int d) { colorIdx = wrap(colorIdx + d, COLOR_NAMES.length); setStyle("subColor", colorIdx); }
+    private void cycleSize(int d) { sizeIdx = clampIdx(sizeIdx + d, SIZE_NAMES.length); setStyle("subSize", sizeIdx); }
+    private void cyclePos(int d) { posIdx = clampIdx(posIdx + d, POS_NAMES.length); setStyle("subPos", posIdx); }
+
+    /** 样式改了：存下来、立刻生效，画面上没字幕时先显示 3 秒示例句 */
+    private void setStyle(String key, int value) {
+        prefs.edit().putInt(key, value).apply();
+        previewUntil = SystemClock.uptimeMillis() + 3000;
+        applyStyle();
+        rebuildPanel(false);
+    }
+
+    private static int wrap(int i, int n) { return (i % n + n) % n; }
+    private static int clampIdx(int i, int n) { return Math.max(0, Math.min(n - 1, i)); }
 
     private void selectSub(int kind, int idx) {
         subKind = kind;
@@ -1728,7 +1831,7 @@ public class PlayerActivity extends Activity {
             else if (!range.isEmpty() && !"SDR".equals(range)) tag("HDR");
             break;
         }
-        tag(triedTranscode ? "服务器转码" : "直接播放");
+        tag(qualityIdx > 0 ? QUALITY_NAMES[qualityIdx] : triedTranscode ? "服务器转码" : "直接播放");
         if (SPEEDS[speedIdx] != 1f) tag(SPEEDS[speedIdx] + "×");
     }
 

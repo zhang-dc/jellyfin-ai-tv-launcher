@@ -147,10 +147,19 @@ final class Jellyfin {
      * **必须写明分辨率和码率上限**：2026-10-31 没写，Jellyfin 默认转成了 416×234，用户看行尸走肉「突然变糊」。
      */
     String transcodeUrl(String id, String mediaSourceId, int audioStreamIndex) {
+        return transcodeUrl(id, mediaSourceId, audioStreamIndex, 3840, 40_000_000);
+    }
+
+    /**
+     * 指定画质（播放器「画质」选项）：maxWidth 宽度上限，videoBitrate 视频码率上限（bps）。
+     * 片源本身就在上限以内时 Jellyfin 仍会原样复制视频；超了才按上限重新编码。
+     */
+    String transcodeUrl(String id, String mediaSourceId, int audioStreamIndex, int maxWidth, int videoBitrate) {
         return server + "/Videos/" + id + "/master.m3u8?mediaSourceId=" + mediaSourceId + "&api_key=" + apiKey
                 + (audioStreamIndex >= 0 ? "&AudioStreamIndex=" + audioStreamIndex : "")
                 + "&VideoCodec=hevc,h264&AudioCodec=aac&AllowVideoStreamCopy=true&AllowAudioStreamCopy=true"
-                + "&MaxWidth=3840&MaxHeight=2160&VideoBitrate=40000000&AudioBitrate=320000&TranscodingMaxAudioChannels=2"
+                + "&MaxWidth=" + maxWidth + "&MaxHeight=" + (maxWidth * 9 / 16) + "&VideoBitrate=" + videoBitrate
+                + "&AudioBitrate=320000&TranscodingMaxAudioChannels=2"
                 + "&SegmentContainer=mp4&DeviceId=tvhome&PlaySessionId=" + Long.toHexString(System.nanoTime());
     }
 

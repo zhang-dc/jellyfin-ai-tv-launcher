@@ -1,0 +1,7 @@
+# 按应用的特殊处理名单。复制成 apps.properties 再填，那个文件不要提交。包名用逗号分隔，空着就是不启用。
+
+# 只做了手机触屏界面、遥控器方向键走不进内容区的应用：在前台时屏幕上出光标（鼠标模式，见 MouseMode.java）
+touch_apps=
+
+# 需要走代理的应用：切到前台时让 v2rayNG 启动 VPN（v2rayNG 里要开「分应用」并只勾这些应用，见 HomeKeyService.java）
+proxy_apps=

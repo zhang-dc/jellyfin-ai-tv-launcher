@@ -17,7 +17,8 @@ import android.view.accessibility.AccessibilityEvent;
  * 所以原厂桌面保持启用，由这个无障碍服务：
  *   1. 截下主页键，直接拉起本桌面（按键被吃掉，原厂桌面不会出来）；
  *   2. 原厂桌面自己跑到前台（开机、从应用退出落回主页）时切回本桌面；
- *   3. 用户从「小米影视」入口主动打开原厂桌面时放行（MainActivity 打开前调 allowStockHome()）。
+ *   3. 用户从「小米影视」入口主动打开原厂桌面时放行（MainActivity 打开前调 allowStockHome()）；
+ *   4. 只有手机触屏界面的应用在前台时给遥控器一个光标（MouseMode）。
  * 无障碍服务被系统绑定，所以后台拉起 Activity 不受 Android 10 的限制。
  *
  * 启用（adb，一次性）：node tv.mjs enable-home-service。
@@ -32,6 +33,8 @@ public class HomeKeyService extends AccessibilityService {
     private static boolean inStockHome = false;
 
     private static HomeKeyService instance;
+    /** 触屏应用的遥控器光标，见 MouseMode */
+    private MouseMode mouse;
 
     /**
      * 小爱的弹窗 / 卡片还在屏幕上就按一次返回关掉（借小爱听写后，别让它自己再答一遍、再念一遍）。
@@ -64,7 +67,7 @@ public class HomeKeyService extends AccessibilityService {
 
     @Override
     protected boolean onKeyEvent(KeyEvent event) {
-        if (event.getKeyCode() != KeyEvent.KEYCODE_HOME) return false;
+        if (event.getKeyCode() != KeyEvent.KEYCODE_HOME) return mouse != null && mouse.onKey(event);
         if (event.getAction() == KeyEvent.ACTION_UP) {
             inStockHome = false;
             goHome();
@@ -77,6 +80,12 @@ public class HomeKeyService extends AccessibilityService {
         // 原厂桌面从应用退回前台时不发 windowStateChanged（实测只收到 systemui 的），
         // 所以不看事件本身是谁发的，而是每次窗口变化都看当前活动窗口归哪个包
         String pkg = foregroundPackage();
+        if (mouse != null) {
+            // 普通应用看活动窗口（使用记录在应用刚打开时还没写进去，会慢一拍）；原厂桌面对无障碍隐藏，才退回用使用记录
+            String win = activeAppWindowPackage();
+            mouse.onForeground(win != null ? win : pkg);
+            onAppForeground(win != null ? win : pkg);
+        }
         if (!STOCK_HOME.equals(pkg)) return;
         if (inStockHome || SystemClock.elapsedRealtime() < allowStockUntil) return;
         Log.i(TAG, "stock home in front, redirect");
@@ -101,6 +110,42 @@ public class HomeKeyService extends AccessibilityService {
         return last;
     }
 
+    /** 鼠标模式 / 代理的应用名单（assets/apps.properties） */
+    private AppLists apps;
+    private String lastForeground;
+
+    /**
+     * 名单里的应用（电视 DNS 被污染、本身没代理，靠 v2rayNG 分应用 VPN 转到本机 Clash）切到前台时让 v2rayNG 起 VPN —— 电视待机会把 v2rayNG 一起强停，VPN 就断了。
+     * 走它给 Tasker 开的接收器；它自己会判断是否已在运行，重复发不会断线。
+     * 被强停的包收不到隐式广播，所以显式指定组件 + FLAG_INCLUDE_STOPPED_PACKAGES。
+     */
+    private void onAppForeground(String pkg) {
+        if (pkg == null || pkg.equals(lastForeground)) return;
+        lastForeground = pkg;
+        if (!apps.proxyApps.contains(pkg)) return;
+        android.os.Bundle b = new android.os.Bundle();
+        b.putBoolean("tasker_extra_bundle_switch", true);
+        b.putString("tasker_extra_bundle_guid", "Default");
+        Intent i = new Intent("com.twofortyfouram.locale.intent.action.FIRE_SETTING")
+                .setClassName("com.v2ray.ang", "com.v2ray.ang.receiver.TaskerReceiver")
+                .putExtra("com.twofortyfouram.locale.intent.extra.BUNDLE", b)
+                .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+        sendBroadcast(i);
+        Log.i(TAG, "kick v2rayNG for " + pkg);
+    }
+
+    private String activeAppWindowPackage() {
+        for (android.view.accessibility.AccessibilityWindowInfo w : getWindows()) {
+            if (w.getType() != android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION || !w.isActive()) continue;
+            android.view.accessibility.AccessibilityNodeInfo root = w.getRoot();
+            if (root == null) continue;
+            CharSequence p = root.getPackageName();
+            root.recycle();
+            if (p != null) return p.toString();
+        }
+        return null;
+    }
+
     @Override
     public void onInterrupt() {
     }
@@ -108,6 +153,7 @@ public class HomeKeyService extends AccessibilityService {
     @Override
     public boolean onUnbind(Intent intent) {
         instance = null;
+        if (mouse != null) { mouse.release(); mouse = null; }
         return super.onUnbind(intent);
     }
 
@@ -115,6 +161,16 @@ public class HomeKeyService extends AccessibilityService {
     protected void onServiceConnected() {
         Log.i(TAG, "connected");
         instance = this;
+        apps = new AppLists(this);
+        mouse = new MouseMode(this, apps.touchApps);
+        // 刚连上时前台可能已经是触屏应用（guard 补回服务、系统重绑），不等下一个窗口事件
+        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+            if (mouse == null) return;
+            String win = activeAppWindowPackage();
+            String fg = win != null ? win : foregroundPackage();
+            mouse.onForeground(fg);
+            onAppForeground(fg);
+        }, 500);
     }
 
     private void goHome() {

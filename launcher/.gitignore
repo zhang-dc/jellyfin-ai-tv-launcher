@@ -3,3 +3,4 @@ debug.keystore
 assets/jellyfin.properties
 assets/gateway.properties
 libs/
+assets/apps.properties

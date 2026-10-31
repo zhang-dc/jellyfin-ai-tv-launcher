@@ -100,7 +100,6 @@ public class MainActivity extends Activity {
     private String appsSignature = "", playedSignature = "", addedSignature = "";
     /** 回到桌面后用户还没按过方向键：数据到了就把焦点放到「最近播放」第一张。 */
     private boolean untouched = true;
-    private int scrollTarget = 0;
 
     static final class App {
         String pkg, label;
@@ -732,7 +731,7 @@ public class MainActivity extends Activity {
                 // 网格格子自己带名字（横幅上也有），标题只跟常用栏
                 focusTitle.setText(inDock ? a.label : "");
                 scrollFor(inDock ? null : allLabel, v);
-                moveGlow(v, a.color);   // 按滚动终点算位置，不用等滚动停下
+                moveGlow(v, a.color);   // 跟着格子的实际位置走，滚动中也会实时刷新
             }
         });
         t.setOnClickListener(v -> launch(a));
@@ -754,27 +753,29 @@ public class MainActivity extends Activity {
     }
 
     private void scrollTo(int y) {
-        scrollTarget = y;
         scroller.smoothScrollTo(0, y);
     }
 
     /**
-     * 光晕跟焦点：位置按纵向滚动的终点算（scrollFor 已经把 scrollTarget 定好），所以不用等滚动停下；
-     * 140ms 减速移动 + 颜色从上一个应用平滑过渡。2026-10-19 用户反馈「不跟手」：原来先等 300ms 再 220ms 匀速、颜色硬切。
+     * 光晕跟焦点：始终按焦点格子**此刻在屏幕上的实际位置**摆（getLocationInWindow），滚动中每一帧都跟着刷新。
+     * 2026-10-19 用户反馈「不跟手」：原来先等 300ms 再 220ms 匀速、颜色硬切 → 改成 140ms 减速移动 + 颜色平滑过渡。
+     * 2026-10-31 用户反馈翻到第二屏光晕落在焦点上方：原来按 scrollTarget（预计滚动终点）提前算，
+     * 但滚到底时 ScrollView 会把滚动截在最大值、到不了 scrollTarget，光晕就偏上了。现在不预测，只看实际位置。
      */
     private final GradientDrawable glowShape = new GradientDrawable();
     private int glowColor = 0;
-    private android.animation.ValueAnimator glowTint;
+    private android.animation.ValueAnimator glowTint, glowMove;
+    /** 光晕跟着的格子 */
+    private View glowTarget;
+    private float glowFromX, glowFromY, glowT = 1f;
 
     private void moveGlow(View target, int color) {
-        int[] loc = new int[2];
-        target.getLocationInWindow(loc);
-        float cx = loc[0] + target.getWidth() / 2f;
-        float cy = loc[1] + target.getHeight() / 2f - (scrollTarget - scroller.getScrollY());
         if (glow.getBackground() != glowShape) {
             glowShape.setGradientType(GradientDrawable.RADIAL_GRADIENT);
             glowShape.setGradientRadius(dp(360));
             glow.setBackground(glowShape);
+            // 任何滚动（纵向翻屏、行内横滚）都让光晕重新对准焦点
+            scroller.getViewTreeObserver().addOnScrollChangedListener(this::placeGlow);
         }
         boolean wasHidden = glow.getAlpha() < 0.05f;
         if (glowTint != null) glowTint.cancel();
@@ -786,18 +787,38 @@ public class MainActivity extends Activity {
             glowShape.setColors(new int[]{(glowColor & 0x00FFFFFF) | 0x88000000, glowColor & 0x00FFFFFF});
         });
         glowTint.start();
-        glow.animate().cancel();
-        if (wasHidden) {   // 从隐藏状态出现：直接就位再淡入，不要从上次的位置飞过来
-            glow.setX(cx - glow.getWidth() / 2f);
-            glow.setY(cy - glow.getHeight() / 2f);
+
+        // 位置：从当前位置插值到「目标格子的实时位置」，插值途中目标还在滚也追得上
+        glowTarget = target;
+        glowFromX = glow.getX();
+        glowFromY = glow.getY();
+        if (glowMove != null) glowMove.cancel();
+        glowT = wasHidden ? 1f : 0f;   // 从隐藏状态出现：直接就位再淡入，不要从上次的位置飞过来
+        placeGlow();
+        if (!wasHidden) {
+            glowMove = android.animation.ValueAnimator.ofFloat(0f, 1f);
+            glowMove.setDuration(140);
+            glowMove.setInterpolator(new android.view.animation.DecelerateInterpolator(1.6f));
+            glowMove.addUpdateListener(an -> { glowT = (float) an.getAnimatedValue(); placeGlow(); });
+            glowMove.start();
         }
-        glow.animate()
-                .x(cx - glow.getWidth() / 2f)
-                .y(cy - glow.getHeight() / 2f)
-                .alpha(1f)
-                .setDuration(140)
-                .setInterpolator(new android.view.animation.DecelerateInterpolator(1.6f))
-                .start();
+        glow.animate().cancel();
+        glow.animate().alpha(1f).setDuration(140).start();
+    }
+
+    /** 把光晕中心摆到 glowTarget 在屏幕上的中心（移动动画没走完时按进度插值）。 */
+    private void placeGlow() {
+        View t = glowTarget;
+        if (t == null || !t.isAttachedToWindow()) return;
+        int[] loc = new int[2], base = new int[2];
+        t.getLocationInWindow(loc);
+        ((View) glow.getParent()).getLocationInWindow(base);
+        // getLocationInWindow 是缩放后的左上角（焦点格子会放大），中心按缩放后的宽高算
+        float cx = loc[0] - base[0] + t.getWidth() * t.getScaleX() / 2f;
+        float cy = loc[1] - base[1] + t.getHeight() * t.getScaleY() / 2f;
+        float x = cx - glow.getWidth() / 2f, y = cy - glow.getHeight() / 2f;
+        glow.setX(glowFromX + (x - glowFromX) * glowT);
+        glow.setY(glowFromY + (y - glowFromY) * glowT);
     }
 
     /** 默认焦点：有「最近播放」就第一张（最常见的操作是接着看），否则 Jellyfin。 */

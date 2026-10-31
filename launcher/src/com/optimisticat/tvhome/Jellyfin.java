@@ -141,12 +141,17 @@ final class Jellyfin {
         return server + "/Videos/" + id + "/stream?static=true&mediaSourceId=" + mediaSourceId + "&api_key=" + apiKey;
     }
 
-    /** 放不了原文件时让服务器转成 H.264 + AAC 的 HLS（本机有显卡转码）。audioStreamIndex = MediaStreams 里的 Index，-1 用默认音轨。 */
+    /**
+     * 放不了原文件时让服务器出 HLS。audioStreamIndex = MediaStreams 里的 Index，-1 用默认音轨。
+     * 视频是 HEVC / H.264（电视能硬解）就原样复制、只转音频；别的（AV1 等）用显卡转 H.264，保持原分辨率。
+     * **必须写明分辨率和码率上限**：2026-10-31 没写，Jellyfin 默认转成了 416×234，用户看行尸走肉「突然变糊」。
+     */
     String transcodeUrl(String id, String mediaSourceId, int audioStreamIndex) {
         return server + "/Videos/" + id + "/master.m3u8?mediaSourceId=" + mediaSourceId + "&api_key=" + apiKey
                 + (audioStreamIndex >= 0 ? "&AudioStreamIndex=" + audioStreamIndex : "")
-                + "&VideoCodec=h264&AudioCodec=aac&TranscodingMaxAudioChannels=2&SegmentContainer=ts&DeviceId=tvhome&PlaySessionId="
-                + Long.toHexString(System.nanoTime());
+                + "&VideoCodec=hevc,h264&AudioCodec=aac&AllowVideoStreamCopy=true&AllowAudioStreamCopy=true"
+                + "&MaxWidth=3840&MaxHeight=2160&VideoBitrate=40000000&AudioBitrate=320000&TranscodingMaxAudioChannels=2"
+                + "&SegmentContainer=mp4&DeviceId=tvhome&PlaySessionId=" + Long.toHexString(System.nanoTime());
     }
 
     /**

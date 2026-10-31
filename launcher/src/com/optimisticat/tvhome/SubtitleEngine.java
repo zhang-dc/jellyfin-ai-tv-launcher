@@ -40,6 +40,21 @@ final class SubtitleEngine {
         return cues.size();
     }
 
+    /** 第 i 句（按开始时间排好序）；「对齐台词」列表用。 */
+    Cue get(int i) {
+        return cues.get(i);
+    }
+
+    /** 第一句开始时间晚于 t（字幕时间，已减偏移）的下标；都早于 t 返回 size()。 */
+    int nextIndex(long t) {
+        int lo = 0, hi = starts.length;
+        while (lo < hi) {
+            int mid = (lo + hi) >>> 1;
+            if (starts[mid] <= t) lo = mid + 1; else hi = mid;
+        }
+        return lo;
+    }
+
     void load(String srt) {
         cues.clear();
         String[] blocks = srt.replace("\r", "").replace("\uFEFF", "").split("\n\\s*\n");

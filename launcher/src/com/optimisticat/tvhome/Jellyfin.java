@@ -183,6 +183,11 @@ final class Jellyfin {
         post("/UserItems/" + id + "/UserData?userId=" + userId, body.toString());
     }
 
+    /** 让 Jellyfin 重新扫这一集（字幕文件被改 / 新增后，流列表要等它扫完才更新）。 */
+    void refreshItem(String id) throws Exception {
+        post("/Items/" + id + "/Refresh?MetadataRefreshMode=Default&ImageRefreshMode=None&ReplaceAllMetadata=false&ReplaceAllImages=false", "{}");
+    }
+
     /** 片头 / 片尾段（Jellyfin 10.10+，需片头检测插件；没有返回空数组）。 */
     JSONArray mediaSegments(String id) throws Exception {
         JSONArray a = getJson("/MediaSegments/" + id).optJSONArray("Items");

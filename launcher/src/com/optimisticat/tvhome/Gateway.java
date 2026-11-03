@@ -35,10 +35,11 @@ final class Gateway {
         port = Integer.parseInt(p.getProperty("port", "18796"));
     }
 
-    /** 发一条消息给 Agent；回复从 events() 取。 */
-    void chat(String text) throws Exception {
+    /** 发一条消息给 Agent，返回这条消息的序号；回复从 events(序号, …) 取（序号更大的 assistant 消息）。 */
+    long chat(String text) throws Exception {
         JSONObject body = new JSONObject().put("text", text);
-        request("POST", "/tv/chat", "application/json", body.toString().getBytes(StandardCharsets.UTF_8), 15_000);
+        byte[] r = request("POST", "/tv/chat", "application/json", body.toString().getBytes(StandardCharsets.UTF_8), 15_000);
+        return new JSONObject(new String(r, StandardCharsets.UTF_8)).optLong("seq");
     }
 
     /** 「新对话」：服务端清历史并开新会话。 */

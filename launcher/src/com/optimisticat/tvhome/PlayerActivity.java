@@ -122,7 +122,9 @@ public class PlayerActivity extends Activity {
     private View progressFill, progressThumb, scrubMark;
     private FrameLayout track;
     private final List<View> chapterTicks = new ArrayList<>();
-    private TextView barTitle, barSub, barPos, barLeft, toast;
+    private TextView barTitle, barSub, barPos, barLeft, toast, agentCard;
+    /** 「让 Agent 检查字幕」进行中（同一时间只跑一个） */
+    private volatile boolean agentBusy = false;
     private TextView ctlNext, ctlEpisodes, ctlSpeed, ctlSync, ctlQuality;
     private final SubtitleEngine subs = new SubtitleEngine();
     private SharedPreferences prefs;
@@ -417,20 +419,55 @@ public class PlayerActivity extends Activity {
 
     // ---------------------------------------------------------------- 字幕
 
-    /** 默认字幕：中文优先（语言字段 / 标题里带中文），外挂优先于内嵌；没有中文就先关着。 */
+    /**
+     * 默认字幕：这部剧上次手动选过的那条（按外挂文件后缀认，比如「.zho.srt」，下一集同名后缀的就是它）优先；
+     * 否则中文优先，简体 > 繁体（2026-11-03 行尸走肉 S2E3：Jellyfin 把一份时间轴坏了的 .zh-TW.srt 排第一，
+     * 原来同分取第一个就选中了它），外挂 > 内嵌，听障版（.hi）靠后；没有中文就先关着。
+     */
     private int pickDefaultSub() {
+        String remembered = prefs.getString(subPickKey(), null);
+        if ("off".equals(remembered)) return -1;
+        if (remembered != null) for (int i = 0; i < textSubs.size(); i++) if (remembered.equals(subSig(textSubs.get(i)))) return i;
         int best = -1, bestScore = 0;
         for (int i = 0; i < textSubs.size(); i++) {
             JSONObject s = textSubs.get(i);
             String lang = s.optString("Language").toLowerCase(Locale.ROOT);
-            String title = s.optString("DisplayTitle") + s.optString("Title");
+            String title = (s.optString("DisplayTitle") + s.optString("Title")).toLowerCase(Locale.ROOT);
+            String file = s.optString("Path").toLowerCase(Locale.ROOT);
+            file = file.substring(Math.max(file.lastIndexOf('\\'), file.lastIndexOf('/')) + 1);
             int score = 0;
-            if (lang.startsWith("zh") || lang.equals("chi") || lang.equals("zho") || title.matches(".*(中文|简|繁|chs|cht).*")) score += 10;
+            boolean zh = lang.startsWith("zh") || lang.equals("chi") || lang.equals("zho") || title.matches(".*(中文|简|繁|chs|cht).*");
+            if (!zh) continue;
+            score += 10;
+            boolean trad = lang.matches("zh-(tw|hk|hant).*") || title.matches(".*(繁|cht|big5).*") || file.matches(".*[.\\[(](zh-tw|zh-hk|zh-hant|cht|tc|big5)[.\\])].*");
+            boolean simp = !trad && (lang.matches("zho|chi|zh|zh-(cn|hans|sg).*") || title.matches(".*(简|chs).*") || file.matches(".*[.\\[(](zh-cn|zh-hans|chs|sc|gb)[.\\])].*"));
+            if (simp) score += 3;
+            if (trad) score -= 3;
+            if (file.contains(".hi.") || file.contains(".sdh.")) score -= 1;
             if (s.optBoolean("IsExternal")) score += 2;
             if (s.optBoolean("IsDefault")) score += 1;
             if (score > bestScore) { bestScore = score; best = i; }
         }
-        return bestScore >= 10 ? best : -1;
+        return best;
+    }
+
+    /** 「这部剧选的字幕」存在哪：剧（电影就是它自己） */
+    private String subPickKey() {
+        return "subpick:" + (seriesId != null ? seriesId : itemId);
+    }
+
+    /** 字幕轨的身份：外挂按「视频名之后的后缀」（.zho.srt / .zh-TW.srt），内嵌按语言 + 格式 + 标题 */
+    private String subSig(JSONObject s) {
+        String path = s.optString("Path", "");
+        if (s.optBoolean("IsExternal") && !path.isEmpty()) {
+            String file = path.substring(Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/')) + 1);
+            String video = item == null ? "" : item.optString("Path");
+            video = video.substring(Math.max(video.lastIndexOf('\\'), video.lastIndexOf('/')) + 1);
+            int dot = video.lastIndexOf('.');
+            String stem = dot > 0 ? video.substring(0, dot) : video;
+            return "ext:" + (file.startsWith(stem) ? file.substring(stem.length()) : file).toLowerCase(Locale.ROOT);
+        }
+        return "emb:" + s.optString("Language") + ":" + s.optString("Codec") + ":" + s.optString("Title");
     }
 
     private void loadTextSubtitle() {
@@ -1248,6 +1285,20 @@ public class PlayerActivity extends Activity {
         centerIcon.setAlpha(0f);
         root.addView(centerIcon, new FrameLayout.LayoutParams(px(160), px(160), Gravity.CENTER));
 
+        agentCard = Ui.text(this, "", 24, Color.WHITE, Typeface.DEFAULT);
+        agentCard.setPadding(px(28), px(18), px(28), px(20));
+        agentCard.setMaxWidth(px(760));
+        agentCard.setLineSpacing(px(4), 1f);
+        agentCard.setBackground(Ui.rounded(0xE61C1C1E, px(20)));
+        agentCard.setCompoundDrawablePadding(px(14));
+        Icons spark = new Icons(Icons.Kind.SPARK, Ui.ACCENT);
+        spark.setBounds(0, 0, px(30), px(30));
+        agentCard.setCompoundDrawables(spark, null, null, null);
+        agentCard.setVisibility(View.GONE);
+        FrameLayout.LayoutParams ap = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START);
+        ap.setMargins(px(64), px(48), 0, 0);
+        root.addView(agentCard, ap);
+
         toast = Ui.text(this, "", 26, Color.WHITE, Typeface.DEFAULT);
         toast.setPadding(px(32), px(16), px(32), px(16));
         toast.setBackground(Ui.rounded(0xE61C1C1E, px(32)));
@@ -1564,7 +1615,7 @@ public class PlayerActivity extends Activity {
         return syncBox;
     }
 
-    /** 右侧面板：音轨（多于一条才有）→ 字幕轨（文本 / 自带）→ 时间（偏移、对齐台词、永久修正）→ 样式（样式 / 颜色 / 字号 / 位置）。 */
+    /** 右侧面板：音轨（多于一条才有）→ 字幕轨（文本 / 自带）→ 时间（偏移、对齐台词、让 Agent 检查）→ 字幕样式。 */
     private View buildPanel() {
         panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
@@ -1629,7 +1680,7 @@ public class PlayerActivity extends Activity {
         offsetRow.setOnClickListener(v -> openSync());
         note("字幕比声音早就往右调，晚就往左调；按 OK 进「对齐台词」。调好的时间这一季后面几集也会用");
         actionRow("对齐台词（听到哪句选哪句）", this::openSync);
-        actionRow("让 Agent 把字幕文件永久修正", this::askAgentToFix);
+        actionRow(agentBusy ? "Agent 正在检查字幕…" : "让 Agent 检查并修复字幕", this::askAgentToCheck);
 
         section("字幕样式");
         valueRow("字体", FONT_NAMES[fontIdx], () -> { fontIdx = wrap(fontIdx - 1, FONT_NAMES.length); setStyle("subFont", fontIdx); },
@@ -1671,6 +1722,8 @@ public class PlayerActivity extends Activity {
     private void selectSub(int kind, int idx) {
         subKind = kind;
         subIdx = idx;
+        if (kind == 0) prefs.edit().putString(subPickKey(), "off").apply();
+        else if (kind == 1) prefs.edit().putString(subPickKey(), subSig(textSubs.get(idx))).apply();
         applyTextTrackSelection();
         subImage.setVisibility(View.GONE);
         loadTextSubtitle();
@@ -1738,10 +1791,15 @@ public class PlayerActivity extends Activity {
         r.setOnClickListener(v -> act.run());
     }
 
-    private static String trackName(JSONObject s) {
+    /** 「中文（外挂 · zho）」：同一集常有好几份外挂中文，名字全是「中文」，带上文件后缀才分得清 */
+    private String trackName(JSONObject s) {
         String t = s.optString("DisplayTitle");
         if (t.isEmpty()) t = s.optString("Language", "未知");
-        return t.replace(" - SUBRIP", "").replace(" - ASS", "").replace(" - SSA", "").replace(" - 外部", "（外挂）");
+        t = t.replace(" - SUBRIP", "").replace(" - ASS", "").replace(" - SSA", "").replace(" - 默认", "");
+        if (!s.optBoolean("IsExternal")) return t;
+        String sig = subSig(s);
+        String tag = sig.startsWith("ext:") ? sig.substring(4).replaceAll("^\\.", "").replaceAll("\\.(srt|ass|ssa|vtt)$", "") : "";
+        return t.replace(" - 外部", "") + "（外挂" + (tag.isEmpty() ? "" : " · " + tag) + "）";
     }
 
     private void openPanel() {
@@ -1762,35 +1820,140 @@ public class PlayerActivity extends Activity {
         subImage.animate().translationX(0).setDuration(160).start();
     }
 
-    /** 永久修正：交给后端 Agent（docs/protocol.md 的 /tv/chat），不新增接口。 */
-    private void askAgentToFix() {
+    /**
+     * 让 Agent 检查并修复这一集的字幕（走 /tv/chat，和「问问」页是同一个对话，不新增接口）。
+     * 把排查要用的都带上：视频路径、每条字幕（外挂文件路径 / 内嵌轨）、正在用哪条、播放器里调过的时间、当前位置和屏幕上那句。
+     * 怎么查、用什么工具由后端 Agent 自己定（这里只说要查哪些问题），最后一行写【字幕已修改】/【字幕没改】，播放器靠它判断要不要重新加载。
+     * 播放器跟着读回复显示在左上角卡片；改过文件就让 Jellyfin 重扫这一集、重新加载字幕，这一集的手调时间归零（文件已经对了，再叠就错）。
+     */
+    private void askAgentToCheck() {
         Gateway g = Services.gateway(this);
-        if (g == null || subKind != 1 || offsetMs == 0) {
-            showToast(offsetMs == 0 ? "时间是 0，不用修" : subKind != 1 ? "自带字幕轨改不了文件" : "没连后端，修不了");
-            hideToastLater();
-            return;
+        if (g == null) { showToast("没连后端，Agent 用不了"); hideToastLater(); return; }
+        if (agentBusy) { showToast("Agent 还在检查，结果会显示在左上角"); hideToastLater(); return; }
+        if (item == null) return;
+        if (panel.getVisibility() == View.VISIBLE) closePanel();
+        String what = seriesId != null
+                ? item.optString("SeriesName") + " S" + item.optInt("ParentIndexNumber") + "E" + item.optInt("IndexNumber") + "《" + item.optString("Name") + "》"
+                : item.optString("Name");
+        StringBuilder m = new StringBuilder();
+        m.append("【播放器 · 字幕检查】我正在看「").append(what).append("」，字幕好像不对，请检查并修复这一集的中文字幕。\n");
+        m.append("视频：").append(item.optString("Path")).append("\n字幕（Jellyfin 列出的顺序）：\n");
+        JSONArray streams = item.optJSONArray("MediaSources").optJSONObject(0).optJSONArray("MediaStreams");
+        for (int i = 0; streams != null && i < streams.length(); i++) {
+            JSONObject st = streams.optJSONObject(i);
+            if (!"Subtitle".equals(st.optString("Type"))) continue;
+            boolean using = subKind == 1 && subIdx >= 0 && subIdx < textSubs.size() && textSubs.get(subIdx).optInt("Index") == st.optInt("Index");
+            m.append("- ").append(st.optBoolean("IsExternal") ? "外挂 " + st.optString("Path") : "内嵌轨 #" + st.optInt("Index") + " " + st.optString("Language") + " " + st.optString("Codec"))
+                    .append(using ? "（正在用）" : "").append("\n");
         }
-        JSONObject s = textSubs.get(subIdx);
-        String what = (seriesId != null ? item.optString("SeriesName") + " S" + item.optInt("ParentIndexNumber") + "E" + item.optInt("IndexNumber") : item.optString("Name"));
-        String path = s.optString("Path", "");
-        String msg = "把「" + what + "」的字幕整体平移 " + String.format(Locale.US, "%+.1f", offsetMs / 1000.0) + " 秒（正数 = 字幕往后挪）。"
-                + (path.isEmpty() ? "是视频里的内嵌字幕轨「" + trackName(s) + "」，请导出成外挂字幕再平移。" : "字幕文件：" + path)
-                + " 视频：" + item.optString("Path") + "。改完告诉我一声。";
+        if (subKind == 2) m.append("现在用的是视频自带字幕轨。\n");
+        if (subKind == 0) m.append("现在字幕是关着的。\n");
+        if (offsetMs != 0) m.append("我在播放器里把字幕时间调到了 ").append(String.format(Locale.US, "%+.1f", offsetMs / 1000.0)).append(" 秒才大致对上（正数 = 字幕往后挪）。\n");
+        if (player != null) {
+            m.append("现在播放到 ").append(clock(player.getCurrentPosition()));
+            if (shown != null && shown != PREVIEW_CUE) m.append("，屏幕上这句是「").append(shown.primary.replace('\n', ' ')).append("」");
+            m.append("。\n");
+        }
+        m.append("要求：用你的字幕工具查清楚——时间轴偏移、是不是这一集、开头扎堆、片内漂移、繁简标错、串集都算问题。")
+                .append("能修就直接修：时间不对就对齐，内容不对就换一份能对上片源的。只动这一集的字幕文件，改之前留备份，不用再问我确认。")
+                .append("回复给电视看：两三句说清查到什么、改了什么，最后单独一行写【字幕已修改】或【字幕没改】。");
+        agentBusy = true;
+        showAgentCard("Agent 正在检查这一集的字幕…", false);
         final String id = itemId;
         io.execute(() -> {
             try {
-                g.chat(msg);
-                ui.post(() -> {
-                    // 文件改好后这一集不该再叠偏移；记成 0 而不是删掉，不然会退回用这一季的默认值
-                    prefs.edit().putLong("offset:item:" + id, 0).apply();
-                    showToast("已交给 Agent，改好后重新打开这一集就是准的");
-                    hideToastLater();
-                });
+                long seq = g.chat(m.toString());
+                watchAgent(g, id, seq);
             } catch (Exception e) {
-                ui.post(() -> showToast("没发出去：" + e.getMessage()));
+                ui.post(() -> { agentBusy = false; showAgentCard("没发出去：" + e.getMessage(), true); });
             }
         });
     }
+
+    /** 跟着读 Agent 的回复（后台线程，长轮询），最多等 20 分钟。 */
+    private void watchAgent(Gateway g, String id, long since) {
+        long deadline = SystemClock.elapsedRealtime() + 20 * 60_000;
+        long last = since;
+        boolean typing = false;
+        while (!isDestroyed() && SystemClock.elapsedRealtime() < deadline) {
+            try {
+                JSONObject r = g.events(last, typing);
+                typing = r.optBoolean("typing");
+                JSONArray msgs = r.optJSONArray("messages");
+                for (int i = 0; msgs != null && i < msgs.length(); i++) {
+                    JSONObject mm = msgs.optJSONObject(i);
+                    if (mm.optLong("seq") <= last) continue;
+                    last = mm.optLong("seq");
+                    if (!"assistant".equals(mm.optString("role"))) continue;
+                    String text = mm.optString("text");
+                    boolean changed = text.contains("【字幕已修改】"), done = changed || text.contains("【字幕没改】");
+                    String shownText = text.replace("【字幕已修改】", "").replace("【字幕没改】", "").trim();
+                    ui.post(() -> showAgentCard(shownText, done));
+                    if (done) {
+                        ui.post(() -> { agentBusy = false; if (changed && id.equals(itemId)) reloadSubtitles(); });
+                        return;
+                    }
+                }
+            } catch (Exception e) {
+                try { Thread.sleep(3000); } catch (InterruptedException ie) { return; }
+            }
+        }
+        ui.post(() -> { agentBusy = false; showAgentCard("Agent 还没给结论，可以去「问问」里看它在做什么", true); });
+    }
+
+    /**
+     * 字幕文件被改过：让 Jellyfin 重扫这一集、重新读流列表，按原来的选择（文件后缀）接着用；
+     * 这一集的手调时间归零（文件已经对了），季的默认值不动。
+     */
+    private void reloadSubtitles() {
+        final String id = itemId;
+        final String pick = subKind == 1 && subIdx >= 0 && subIdx < textSubs.size() ? subSig(textSubs.get(subIdx)) : null;
+        io.execute(() -> {
+            try {
+                jellyfin.refreshItem(id);
+                Thread.sleep(4000);
+                JSONObject it = jellyfin.item(id);
+                ui.post(() -> {
+                    if (!id.equals(itemId)) return;
+                    item = it;
+                    textSubs.clear();
+                    JSONArray streams = it.optJSONArray("MediaSources").optJSONObject(0).optJSONArray("MediaStreams");
+                    for (int i = 0; streams != null && i < streams.length(); i++) {
+                        JSONObject st = streams.optJSONObject(i);
+                        if ("Subtitle".equals(st.optString("Type")) && st.optBoolean("IsTextSubtitleStream")) textSubs.add(st);
+                    }
+                    int idx = -1;
+                    if (pick != null) for (int i = 0; i < textSubs.size(); i++) if (pick.equals(subSig(textSubs.get(i)))) idx = i;
+                    if (idx < 0) idx = pickDefaultSub();
+                    subKind = idx >= 0 ? 1 : 0;
+                    subIdx = idx;
+                    setOffset(0);
+                    applyTextTrackSelection();
+                    loadTextSubtitle();
+                    if (panel.getVisibility() == View.VISIBLE) rebuildPanel(false);
+                    showToast("字幕已重新加载" + (subKind == 1 ? "：" + trackName(textSubs.get(subIdx)) : ""));
+                    hideToastLater();
+                });
+            } catch (Exception e) {
+                ui.post(() -> { showToast("重新加载字幕失败：" + e.getMessage()); hideToastLater(); });
+            }
+        });
+    }
+
+    /** 左上角的 Agent 卡片：检查中常驻，有结论后 15 秒淡出 */
+    private void showAgentCard(String text, boolean done) {
+        agentCard.setText(text);
+        agentCard.animate().cancel();
+        if (agentCard.getVisibility() != View.VISIBLE) {
+            agentCard.setVisibility(View.VISIBLE);
+            agentCard.setAlpha(0f);
+        }
+        agentCard.animate().alpha(1f).setDuration(180).start();
+        ui.removeCallbacks(hideAgentCard);
+        if (done) ui.postDelayed(hideAgentCard, 15_000);
+    }
+
+    private final Runnable hideAgentCard = () -> agentCard.animate().alpha(0f).setDuration(300).withEndAction(() -> agentCard.setVisibility(View.GONE)).start();
 
     // ---------------------------------------------------------------- 进度条 / 提示
 
